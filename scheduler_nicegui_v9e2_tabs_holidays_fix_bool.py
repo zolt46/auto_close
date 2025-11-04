@@ -8,7 +8,7 @@ Scheduler — NiceGUI v9d
 - 나머지 UI/동작은 v9c2 기반
 """
 import os, json, threading, time, queue
-from datetime import datetime
+from datetime import datetime, timedelta
 from nicegui import ui
 import psutil, pygame, paramiko
 
@@ -157,6 +157,8 @@ file_pick_queue = queue.Queue()
 clipboard_day = None
 tabs_ref = None
 holiday_table = None
+upcoming_table = None
+next_run_label = None
 
 # ----- File picker (front-most) -----
 def _tk_pick_thread(multiple=True):
@@ -204,6 +206,7 @@ def consume_file_queue():
         save_config(config); ui.notify(f'{added}개 추가됨')
     refresh_playlist_table()
     refresh_day_cards()
+    refresh_upcoming_table()
     if before == 0 and added > 0 and tabs_ref is not None:
         try:
             tabs_ref.value = '요일 스케줄'
@@ -240,7 +243,7 @@ def add_holiday_date(d):
     if ds not in hd['dates']:
         hd['dates'].append(ds)
         save_config(config)
-        refresh_holiday_table()
+        refresh_holiday_table(); refresh_upcoming_table()
         ui.notify(f'추가: {ds}')
 
 def add_holiday_range(s, e):
@@ -252,7 +255,7 @@ def add_holiday_range(s, e):
     hd = config.setdefault('holidays', {"enabled": True, "dates": [], "ranges": []})
     hd['ranges'].append({'start': ss, 'end': ee})
     save_config(config)
-    refresh_holiday_table()
+    refresh_holiday_table(); refresh_upcoming_table()
     ui.notify(f'추가: {ss} ~ {ee}')
 
 def remove_selected_holiday():
@@ -269,7 +272,7 @@ def remove_selected_holiday():
     else:
         hd['ranges'] = [r for r in hd.get('ranges', []) if not (str(r.get('start'))==s and str(r.get('end'))==e)]
     save_config(config)
-    refresh_holiday_table()
+    refresh_holiday_table(); refresh_upcoming_table()
     ui.notify('삭제됨')
 
 # ----- Playlist actions -----
@@ -278,6 +281,7 @@ def refresh_playlist_table():
     if playlist_table is not None:
         playlist_table.rows = rows
         playlist_table.update()
+    refresh_upcoming_table()
 
 def selected_index():
     if playlist_table is None:
@@ -304,7 +308,7 @@ def move_up():
         moved_path = config["playlist"][idx]
         config["playlist"][idx-1], config["playlist"][idx] = config["playlist"][idx], config["playlist"][idx-1]
         save_config(config); refresh_playlist_table(); select_row_by_path(moved_path)
-        refresh_day_cards()
+        refresh_day_cards(); refresh_upcoming_table()
 
 def move_down():
     idx = selected_index()
@@ -313,7 +317,7 @@ def move_down():
         moved_path = config["playlist"][idx]
         config["playlist"][idx+1], config["playlist"][idx] = config["playlist"][idx], config["playlist"][idx+1]
         save_config(config); refresh_playlist_table(); select_row_by_path(moved_path)
-        refresh_day_cards()
+        refresh_day_cards(); refresh_upcoming_table()
 
 def remove_selected():
     idx = selected_index()
@@ -324,7 +328,7 @@ def remove_selected():
     elif len(config["playlist"]) > 0: next_path = config["playlist"][-1]
     if next_path: select_row_by_path(next_path)
     ui.notify(f'삭제: {os.path.basename(removed)}')
-    refresh_day_cards()
+    refresh_day_cards(); refresh_upcoming_table()
 
 # ----- Mini Player -----
 # ----- Holiday helpers -----
@@ -389,6 +393,70 @@ def compute_play_path_for_day(dkey):
     idx = weekly_mapped_index(dkey, len(pl))
     return pl[idx] if idx is not None else None
 
+# ----- Upcoming schedule preview -----
+def compute_upcoming_events(limit=8):
+    """Return list of upcoming schedule entries skipping holidays and past times."""
+    events = []
+    now = datetime.now()
+    holidays_enabled = config.get('holidays', {}).get('enabled', True)
+    lookahead_days = max(limit * 7, 21)
+    for offset in range(lookahead_days):
+        if len(events) >= limit:
+            break
+        target_dt = now + timedelta(days=offset)
+        dkey = DAYS[target_dt.weekday()]
+        dconf = config.get('schedule', {}).get(dkey, {})
+        date_str = target_dt.strftime('%Y-%m-%d')
+        if holidays_enabled and is_holiday_date(date_str):
+            continue
+        if not dconf.get('enabled', False):
+            continue
+        scheduled_dt = target_dt.replace(
+            hour=int(dconf.get('time', {}).get('hh', 9)),
+            minute=int(dconf.get('time', {}).get('mm', 0)),
+            second=0,
+            microsecond=0,
+        )
+        if scheduled_dt <= now:
+            continue
+        mode = '수동 지정' if dconf.get('mode', 'weekly') == 'fixed' else '플레이리스트 순차'
+        events.append({
+            'datetime': scheduled_dt,
+            'date': scheduled_dt.strftime('%Y-%m-%d'),
+            'weekday': DAY_LABEL.get(dkey, dkey.upper()),
+            'time': scheduled_dt.strftime('%H:%M'),
+            'mode': mode,
+            'file': resolved_file_label(dkey),
+            'path': compute_play_path_for_day(dkey),
+        })
+    return events
+
+def refresh_upcoming_table():
+    global upcoming_table, next_run_label
+    if upcoming_table is None:
+        return
+    events = compute_upcoming_events()
+    rows = [
+        {
+            'idx': i + 1,
+            'date': ev['date'],
+            'weekday': ev['weekday'],
+            'time': ev['time'],
+            'mode': ev['mode'],
+            'file': ev['file'],
+        }
+        for i, ev in enumerate(events)
+    ]
+    upcoming_table.rows = rows
+    upcoming_table.update()
+    if next_run_label is not None:
+        if events:
+            ev = events[0]
+            next_run_label.text = f"다음 실행: {ev['date']}({ev['weekday']}) {ev['time']} · {ev['file']}"
+        else:
+            next_run_label.text = '예정된 실행 일정이 없습니다. 요일 스케줄을 활성화하세요.'
+        next_run_label.update()
+
 # ----- Copy/Paste/Test -----
 def copy_day(dkey):
     global clipboard_day
@@ -417,6 +485,7 @@ def refresh_day_cards():
         weekly_base_select.options = base_opts
         weekly_base_select.value = str(int(config['weekly']['base_index']) % max(1, len(config['playlist'])))
         weekly_base_select.update()
+    today_key = DAYS[datetime.now().weekday()]
     for d in DAYS:
         ctrls = day_controls.get(d)
         if not ctrls: continue
@@ -435,11 +504,16 @@ def refresh_day_cards():
         ctrls['file'].visible = is_fixed
         ctrls['resolved'].text = resolved_file_label(d); ctrls['resolved'].update()
         ctrls['sel'].value = day_selected[d]; ctrls['sel'].update()
+        is_today = (d == today_key)
+        card_classes = 'w-[300px] transition-all duration-300 '
         if dconf.get('enabled', False):
-            ctrls['card'].classes(replace='w-[300px] bg-blue-1 shadow-md')
+            card_classes += 'bg-blue-1 shadow-md '
         else:
-            ctrls['card'].classes(replace='w-[300px] bg-grey-1')
+            card_classes += 'bg-grey-1 '
+        card_classes += 'border-2 border-primary' if is_today else 'border border-transparent'
+        ctrls['card'].classes(replace=card_classes)
         ctrls['card'].update()
+    refresh_upcoming_table()
 
 # ----- Handlers -----
 def on_toggle_select_all(on=True):
@@ -456,9 +530,9 @@ def on_enabled_change(e, dkey):
 def on_mode_change(e, dkey):
     config['schedule'][dkey]['mode'] = ('weekly' if e.value == '플레이리스트 순차 적용' else 'fixed'); save_config(config); refresh_day_cards()
 def on_time_change_hh(e, dkey):
-    config['schedule'][dkey]['time']['hh'] = int(e.value); save_config(config)
+    config['schedule'][dkey]['time']['hh'] = int(e.value); save_config(config); refresh_upcoming_table()
 def on_time_change_mm(e, dkey):
-    config['schedule'][dkey]['time']['mm'] = int(e.value); save_config(config)
+    config['schedule'][dkey]['time']['mm'] = int(e.value); save_config(config); refresh_upcoming_table()
 def on_file_change(e, dkey):
     config['schedule'][dkey]['file'] = find_path_by_label(e.value); save_config(config); refresh_day_cards()
 def on_weekly_base_change(e):
@@ -466,6 +540,14 @@ def on_weekly_base_change(e):
         config['weekly']['base_index'] = int(e.value)
         save_config(config); refresh_day_cards()
     except Exception: pass
+
+def on_holiday_enabled_change(e):
+    enabled = bool(e.value)
+    config.setdefault('holidays', {"enabled": True, "dates": [], "ranges": []})
+    config['holidays']['enabled'] = enabled
+    save_config(config)
+    refresh_upcoming_table()
+    ui.notify('휴일 적용: ' + ('ON' if enabled else 'OFF'))
 
 # ----- Batch apply -----
 def selected_days():
@@ -517,7 +599,7 @@ with ui.column().classes('w-full max-w-7xl mx-auto gap-4 p-4'):
                 with ui.row().classes('items-center gap-3'):
                     ui.label('휴일 적용').classes('text-sm text-blue-grey-7')
                     sw_holiday = ui.switch(value=config.get('holidays',{}).get('enabled', True),
-                                           on_change=lambda e: (config['holidays'].__setitem__('enabled', bool(e.value)), save_config(config), ui.notify('휴일 적용: ' + ('ON' if e.value else 'OFF'))))
+                                           on_change=on_holiday_enabled_change)
                 ui.separator()
 
                 # Single date add
@@ -575,6 +657,21 @@ with ui.column().classes('w-full max-w-7xl mx-auto gap-4 p-4'):
 
         # --- Tab: Weekly Schedule ---
         with ui.tab_panel('요일 스케줄'):
+            with ui.card().classes('w-full shadow-sm') as upcoming_card:
+                upcoming_card.style('background: linear-gradient(135deg, rgba(30,136,229,0.12), rgba(30,136,229,0.04));')
+                ui.label('다가오는 실행 일정').classes('text-base font-semibold')
+                ui.label('휴일을 제외한 다음 실행 순서를 한눈에 확인하세요.').classes('text-sm text-blue-grey-7')
+                next_run_label = ui.label('').classes('text-sm text-primary font-medium mt-1')
+                cols = [
+                    {'name': 'idx', 'label': '#', 'field': 'idx', 'align': 'center'},
+                    {'name': 'date', 'label': '날짜', 'field': 'date'},
+                    {'name': 'weekday', 'label': '요일', 'field': 'weekday', 'align': 'center'},
+                    {'name': 'time', 'label': '시간', 'field': 'time', 'align': 'center'},
+                    {'name': 'mode', 'label': '모드', 'field': 'mode', 'align': 'center'},
+                    {'name': 'file', 'label': '재생 항목', 'field': 'file'},
+                ]
+                upcoming_table = ui.table(columns=cols, rows=[], row_key='idx').classes('w-full mt-2')
+                ui.button('일정 새로고침', icon='refresh', on_click=refresh_upcoming_table).props('outline dense').classes('self-end mt-2')
             # 전역 설정 카드
             with ui.card().classes('w-full'):
                 ui.label('전역 설정').classes('text-base font-semibold')
@@ -654,9 +751,15 @@ with ui.column().classes('w-full max-w-7xl mx-auto gap-4 p-4'):
                         }
                         file_sel.visible = (dconf.get('mode','weekly') == 'fixed')
 
+# 초기 UI 동기화
+refresh_playlist_table()
+refresh_day_cards()
+refresh_upcoming_table()
+
 # timers / worker
 ui.timer(0.3, consume_file_queue)
 ui.timer(0.6, refresh_holiday_table)
+ui.timer(60, refresh_upcoming_table)
 
 def scheduler_loop():
     while True:
