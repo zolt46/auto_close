@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import psutil
 
@@ -521,6 +521,8 @@ class PlaylistPanel(FancyCard):
         super().__init__("플레이리스트", accent, parent)
         self.cfg_mgr = cfg_mgr
         self.set_subtitle("자동 음성 지정 시 순차 사용 · 미리 듣기 지원")
+        self._preview_listeners: List[Callable[[str], None]] = []
+        self._stop_preview_listeners: List[Callable[[], None]] = []
         layout = QtWidgets.QVBoxLayout()
         layout.setSpacing(12)
         self.list_widget = QtWidgets.QListWidget()
@@ -607,7 +609,22 @@ class PlaylistPanel(FancyCard):
         if not path or not Path(path).exists():
             QtWidgets.QMessageBox.warning(self, "재생 불가", "파일을 찾을 수 없습니다. 경로를 확인해주세요.")
             return
-        self.preview_requested.emit(path)
+        self._emit_preview(path)
+
+    def add_preview_listener(self, callback: Callable[[str], None]) -> None:
+        if callback not in self._preview_listeners:
+            self._preview_listeners.append(callback)
+
+    def add_stop_preview_listener(self, callback: Callable[[], None]) -> None:
+        if callback not in self._stop_preview_listeners:
+            self._stop_preview_listeners.append(callback)
+
+    def _emit_preview(self, path: str) -> None:
+        signal = getattr(self, "preview_requested", None)
+        if signal is not None:
+            signal.emit(path)
+        for callback in list(self._preview_listeners):
+            callback(path)
 
     def _emit_stop_preview(self) -> None:
         # 일부 PySide6 배포본에서는 사용자 정의 Signal 속성이 지연 초기화되면서
@@ -616,6 +633,8 @@ class PlaylistPanel(FancyCard):
         signal = getattr(self, "stop_preview_requested", None)
         if signal is not None:
             signal.emit()
+        for callback in list(self._stop_preview_listeners):
+            callback()
 
 
 
@@ -1160,8 +1179,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scheduler.next_run_changed.connect(self.dashboard.update_next_run)
         self.audio_service.playback_started.connect(self._on_playback_started)
         self.audio_service.playback_finished.connect(self._on_playback_finished)
-        self.playlist_panel.preview_requested.connect(self._on_preview_requested)
-        self.playlist_panel.stop_preview_requested.connect(self._on_stop_preview)
+        preview_signal = getattr(self.playlist_panel, "preview_requested", None)
+        if preview_signal is not None:
+            preview_signal.connect(self._on_preview_requested)
+        else:
+            self.playlist_panel.add_preview_listener(self._on_preview_requested)
+        stop_signal = getattr(self.playlist_panel, "stop_preview_requested", None)
+        if stop_signal is not None:
+            stop_signal.connect(self._on_stop_preview)
+        else:
+            self.playlist_panel.add_stop_preview_listener(self._on_stop_preview)
         self.cfg_mgr.config_changed.connect(self._on_config_changed)
         for card in self.day_cards.values():
             card.changed.connect(lambda _: self.scheduler._compute_next_run())
