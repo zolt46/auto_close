@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPalette, QColor
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QMediaContent
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
 CONFIG_DIR = (
