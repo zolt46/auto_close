@@ -104,6 +104,7 @@ class SchedulerConfig:
     holiday_ranges: List[Dict[str, str]] = field(default_factory=list)
     start_with_os: bool = False
     theme_accent: str = "#2A5CAA"
+    shutdown_logs: List[Dict[str, str]] = field(default_factory=list)
     days: Dict[str, DaySchedule] = field(
         default_factory=lambda: {key: DaySchedule(enabled=(key not in {"sat", "sun"})) for key in DAY_KEYS}
     )
@@ -129,6 +130,7 @@ class SchedulerConfig:
             "holiday_ranges",
             "start_with_os",
             "theme_accent",
+            "shutdown_logs",
         ):
             if key in data:
                 setattr(base, key, data[key])
@@ -393,14 +395,15 @@ class FancyCard(QtWidgets.QFrame):
 
     def _apply_styles(self) -> None:
         accent = QtGui.QColor(self._accent)
-        border = accent.lighter(140).name()
-        title_color = accent.darker(120).name()
-        subtitle_color = "#4B5B75"
+        border = accent.lighter(130).name()
+        fill = accent.lighter(180).name()
+        title_color = accent.darker(140).name()
+        subtitle_color = accent.darker(110).name()
         self.setStyleSheet(
             f"""
             QFrame#FancyCard {{
                 border-radius: 18px;
-                background: #FFFFFF;
+                background: {fill};
                 border: 1px solid {border};
             }}
             QFrame#FancyCard QLabel[role="title"] {{
@@ -963,6 +966,99 @@ class DashboardCard(FancyCard):
         self.timer_label.setText(f"{when:%Y-%m-%d %H:%M}")
         self.detail_label.setText(f"{hours}시간 {minutes}분 후 실행")
 
+class TodaySummaryCard(FancyCard):
+    def __init__(self, accent: str, parent=None) -> None:
+        super().__init__("오늘 일정", accent, parent)
+        self.set_subtitle("금일 예약된 시간과 재생 정보를 확인합니다")
+        layout = QtWidgets.QFormLayout()
+        layout.setLabelAlignment(Qt.AlignLeft)
+        layout.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(8)
+        self.status_value = QtWidgets.QLabel("계산 중…")
+        self.time_value = QtWidgets.QLabel("-")
+        self.audio_value = QtWidgets.QLabel("-")
+        self.remote_value = QtWidgets.QLabel("-")
+        self.local_value = QtWidgets.QLabel("-")
+        for label in (
+            self.status_value,
+            self.time_value,
+            self.audio_value,
+            self.remote_value,
+            self.local_value,
+        ):
+            label.setProperty("role", "subtitle")
+        layout.addRow("상태", self.status_value)
+        layout.addRow("예약 시간", self.time_value)
+        layout.addRow("재생 음성", self.audio_value)
+        layout.addRow("원격 종료", self.remote_value)
+        layout.addRow("본체 종료", self.local_value)
+        wrapper = QtWidgets.QWidget()
+        wrapper.setLayout(layout)
+        self.body_layout.addWidget(wrapper)
+
+    def update_from_config(self, cfg: SchedulerConfig, audio_preview: Optional[str]) -> None:
+        today = datetime.now()
+        day_key = DAY_KEYS[today.weekday()]
+        day_cfg = cfg.days.get(day_key)
+        if not day_cfg or not day_cfg.enabled:
+            self.status_value.setText("오늘은 일정이 비활성화되어 있습니다")
+            self.time_value.setText("-")
+            self.audio_value.setText("-")
+            self.remote_value.setText("-")
+            self.local_value.setText("-")
+            return
+        self.status_value.setText("예정된 일정이 활성화되어 있습니다")
+        self.time_value.setText(day_cfg.time)
+        if audio_preview:
+            name = Path(audio_preview).name
+            self.audio_value.setText(name)
+            self.audio_value.setToolTip(audio_preview)
+        else:
+            self.audio_value.setText("지정된 음성 없음")
+            self.audio_value.setToolTip("")
+        remote_state = "허용" if (cfg.enable_remote_shutdown and day_cfg.allow_remote) else "미사용"
+        local_state = "허용" if (cfg.enable_local_shutdown and day_cfg.allow_local_shutdown) else "미사용"
+        self.remote_value.setText(remote_state)
+        self.local_value.setText(local_state)
+
+    def update_next_run(self, when: Optional[datetime]) -> None:
+        if when is None:
+            return
+        today = datetime.now().date()
+        if when.date() != today:
+            return
+        self.status_value.setText(f"오늘 {when:%H:%M}에 실행 예정")
+
+
+class ShutdownLogCard(FancyCard):
+    clear_requested = Signal()
+
+    def __init__(self, accent: str, parent=None) -> None:
+        super().__init__("원격/종료 로그", accent, parent)
+        self.set_subtitle("최근 종료 요청 내역을 확인합니다")
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setAlternatingRowColors(True)
+        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.body_layout.addWidget(self.list_widget)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch(1)
+        self.clear_btn = QtWidgets.QPushButton("로그 비우기")
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.clicked.connect(self.clear_requested.emit)
+        btn_row.addWidget(self.clear_btn)
+        self.body_layout.addLayout(btn_row)
+
+    def update_logs(self, logs: List[Dict[str, str]]) -> None:
+        self.list_widget.clear()
+        for entry in logs:
+            timestamp = entry.get("at", "")
+            kind = entry.get("type", "")
+            detail = entry.get("detail", "")
+            text = f"[{timestamp}] {kind} - {detail}".strip()
+            self.list_widget.addItem(text)
+        if not logs:
+            self.list_widget.addItem("기록된 종료 내역이 없습니다")
 
 class StatusOverlay(QtWidgets.QWidget):
     def __init__(self) -> None:
@@ -1009,7 +1105,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, cfg_mgr: ConfigManager) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setFixedSize(1180, 860)
+        self.setFixedSize(1040, 720)
         self.cfg_mgr = cfg_mgr
         self.scheduler = SchedulerEngine(cfg_mgr)
         self.audio_service = AudioService()
@@ -1026,10 +1122,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_palette(self) -> None:
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
-        background = QtGui.QColor("#E7EEF8")
+        background = QtGui.QColor("#FFFFFF")
         base = QtGui.QColor("#FFFFFF")
-        text = QtGui.QColor("#0F2940")
-        outline = QtGui.QColor("#C7D7EE")
+        text = QtGui.QColor("#1C2B3E")
+        outline = QtGui.QColor("#D6E2F5")
         palette = self.palette()
         palette.setColor(QPalette.Window, background)
         palette.setColor(QPalette.WindowText, text)
@@ -1045,10 +1141,10 @@ class MainWindow(QtWidgets.QMainWindow):
         accent_border = QtGui.QColor(accent).darker(120).name()
         accent_disabled_bg = QtGui.QColor(accent).lighter(200).name()
         accent_disabled_border = QtGui.QColor(accent).lighter(170).name()
-        tab_bg = QtGui.QColor(accent).lighter(190).name()
-        tab_selected = QtGui.QColor(accent).lighter(150).name()
-        tab_hover = QtGui.QColor(accent).lighter(210).name()
         list_selected = QtGui.QColor(accent).lighter(140).name()
+        drawer_bg = QtGui.QColor(accent).lighter(200).name()
+        drawer_checked = QtGui.QColor(accent).lighter(170).name()
+        header_bg = QtGui.QColor(accent).lighter(210).name()
         text_hex = text.name()
         outline_hex = outline.name()
         self.setStyleSheet(
@@ -1087,17 +1183,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: #F3F6FC;
                 color: #7588A6;
             }}
-            QTabWidget::pane {{ border: none; background: transparent; }}
-            QTabBar::tab {{
-                background: {tab_bg};
-                color: {text_hex};
-                min-width: 140px;
-                padding: 10px 14px;
-                border-radius: 14px;
-                margin: 0 4px;
-            }}
-            QTabBar::tab:selected {{ background: {tab_selected}; font-weight: 600; }}
-            QTabBar::tab:hover {{ background: {tab_hover}; }}
             QListWidget::item:selected {{
                 background: {list_selected};
                 color: white;
@@ -1108,27 +1193,105 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid {outline_hex};
             }}
             QScrollArea {{ background: transparent; }}
+            QFrame#NavDrawer {{
+                background: {drawer_bg};
+                border-right: 1px solid {outline_hex};
+            }}
+            QFrame#NavDrawer QPushButton {{
+                background: transparent;
+                border: none;
+                color: {text_hex};
+                padding: 10px 14px;
+                border-radius: 14px;
+                text-align: left;
+                font-weight: 600;
+            }}
+            QFrame#NavDrawer QPushButton:hover {{ background: {drawer_checked}; }}
+            QFrame#NavDrawer QPushButton:checked {{
+                background: {drawer_checked};
+                color: {accent_hex};
+            }}
+            QToolButton#MenuButton {{
+                background: transparent;
+                border: none;
+                font-size: 20px;
+                color: {accent_hex};
+                padding: 4px 10px;
+                font-weight: 700;
+            }}
+            QToolButton#MenuButton:hover {{ color: {accent_hover}; }}
+            QFrame#TopBar {{
+                background: {header_bg};
+                border-bottom: 1px solid {outline_hex};
+            }}
         """
         )
 
     def _build_ui(self) -> None:
-        scroll_area = QtWidgets.QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
-        central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(20)
+        self._nav_buttons: Dict[str, QtWidgets.QPushButton] = {}
+        self._page_indices: Dict[str, int] = {}
+        root = QtWidgets.QWidget()
+        root_layout = QtWidgets.QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.drawer = QtWidgets.QFrame()
+        self.drawer.setObjectName("NavDrawer")
+        self.drawer.setFixedWidth(240)
+        drawer_layout = QtWidgets.QVBoxLayout(self.drawer)
+        drawer_layout.setContentsMargins(20, 28, 20, 28)
+        drawer_layout.setSpacing(12)
+        drawer_title = QtWidgets.QLabel("메뉴")
+        drawer_title.setProperty("role", "title")
+        drawer_layout.addWidget(drawer_title)
+        drawer_layout.addSpacing(4)
+        self.nav_group = QtWidgets.QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+
+        content_frame = QtWidgets.QFrame()
+        content_layout = QtWidgets.QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        top_bar = QtWidgets.QFrame()
+        top_bar.setObjectName("TopBar")
+        top_layout = QtWidgets.QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(24, 18, 24, 18)
+        top_layout.setSpacing(12)
+        self.menu_button = QtWidgets.QToolButton()
+        self.menu_button.setObjectName("MenuButton")
+        self.menu_button.setText("☰")
+        self.menu_button.setCursor(Qt.PointingHandCursor)
+        top_layout.addWidget(self.menu_button, 0)
+        self.page_title = QtWidgets.QLabel("홈")
+        self.page_title.setProperty("role", "title")
+        top_layout.addWidget(self.page_title, 0)
+        top_layout.addStretch(1)
+        content_layout.addWidget(top_bar, 0)
+        self.content_stack = QtWidgets.QStackedWidget()
+        content_layout.addWidget(self.content_stack, 1)
+
+        root_layout.addWidget(self.drawer)
+        root_layout.addWidget(content_frame, 1)
+        self.setCentralWidget(root)
+
+        # 페이지 구성
         self.dashboard = DashboardCard(self.cfg_mgr.config.theme_accent)
-        layout.addWidget(self.dashboard)
-        tabs = QtWidgets.QTabWidget()
-        tabs.setDocumentMode(True)
-        tabs.setTabPosition(QtWidgets.QTabWidget.North)
-        day_widget = QtWidgets.QWidget()
-        day_layout = QtWidgets.QGridLayout(day_widget)
+        self.today_card = TodaySummaryCard(self.cfg_mgr.config.theme_accent)
+        self.log_card = ShutdownLogCard(self.cfg_mgr.config.theme_accent)
+        home_container = QtWidgets.QWidget()
+        home_layout = QtWidgets.QVBoxLayout(home_container)
+        home_layout.setContentsMargins(24, 20, 24, 24)
+        home_layout.setSpacing(16)
+        home_layout.addWidget(self.dashboard)
+        home_layout.addWidget(self.today_card)
+        home_layout.addWidget(self.log_card)
+        home_layout.addStretch(1)
+        home_page = self._wrap_scroll(home_container)
+
+        day_container = QtWidgets.QWidget()
+        day_layout = QtWidgets.QGridLayout(day_container)
         day_layout.setSpacing(16)
-        day_layout.setContentsMargins(8, 8, 8, 8)
+        day_layout.setContentsMargins(0, 0, 0, 0)
         day_layout.setColumnStretch(0, 1)
         day_layout.setColumnStretch(1, 1)
         self.day_cards = {}
@@ -1137,27 +1300,139 @@ class MainWindow(QtWidgets.QMainWindow):
             row, col = divmod(idx, 2)
             day_layout.addWidget(card, row, col)
             self.day_cards[key] = card
-            self._cards.append(card)
-        tabs.addTab(day_widget, "요일별")
+        day_wrapper = QtWidgets.QWidget()
+        day_wrapper_layout = QtWidgets.QVBoxLayout(day_wrapper)
+        day_wrapper_layout.setContentsMargins(24, 20, 24, 24)
+        day_wrapper_layout.setSpacing(16)
+        day_wrapper_layout.addWidget(day_container)
+        day_wrapper_layout.addStretch(1)
+        day_page = self._wrap_scroll(day_wrapper)
+
         self.playlist_panel = PlaylistPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
-        tabs.addTab(self.playlist_panel, "플레이리스트")
+        playlist_wrapper = QtWidgets.QWidget()
+        playlist_layout = QtWidgets.QVBoxLayout(playlist_wrapper)
+        playlist_layout.setContentsMargins(24, 20, 24, 24)
+        playlist_layout.setSpacing(16)
+        playlist_layout.addWidget(self.playlist_panel)
+        playlist_layout.addStretch(1)
+        playlist_page = self._wrap_scroll(playlist_wrapper)
+
         self.holiday_panel = HolidayPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
-        tabs.addTab(self.holiday_panel, "휴일")
+        holiday_wrapper = QtWidgets.QWidget()
+        holiday_layout = QtWidgets.QVBoxLayout(holiday_wrapper)
+        holiday_layout.setContentsMargins(24, 20, 24, 24)
+        holiday_layout.setSpacing(16)
+        holiday_layout.addWidget(self.holiday_panel)
+        holiday_layout.addStretch(1)
+        holiday_page = self._wrap_scroll(holiday_wrapper)
+
         self.settings_panel = SettingsPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
-        tabs.addTab(self.settings_panel, "설정")
-        layout.addWidget(tabs)
-        layout.addStretch(1)
-        scroll_area.setWidget(central)
-        self.setCentralWidget(scroll_area)
+        settings_wrapper = QtWidgets.QWidget()
+        settings_layout = QtWidgets.QVBoxLayout(settings_wrapper)
+        settings_layout.setContentsMargins(24, 20, 24, 24)
+        settings_layout.setSpacing(16)
+        settings_layout.addWidget(self.settings_panel)
+        settings_layout.addStretch(1)
+        settings_page = self._wrap_scroll(settings_wrapper)
+
+        page_definitions = [
+            ("홈", home_page),
+            ("요일 일정", day_page),
+            ("플레이리스트", playlist_page),
+            ("휴일", holiday_page),
+            ("고급 설정", settings_page),
+        ]
+
+        for name, widget in page_definitions:
+            index = self.content_stack.addWidget(widget)
+            self._page_indices[name] = index
+            btn = QtWidgets.QPushButton(name)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, n=name: self._set_active_page(n))
+            self.nav_group.addButton(btn)
+            self._nav_buttons[name] = btn
+            drawer_layout.addWidget(btn)
+
+        drawer_layout.addStretch(1)
+        self.drawer.hide()
+        self.menu_button.clicked.connect(self._toggle_drawer)
+        self.log_card.clear_requested.connect(self._clear_logs)
         self._cards.extend(
             [
                 self.dashboard,
+                self.today_card,
+                self.log_card,
+                *self.day_cards.values(),
                 self.playlist_panel,
                 self.holiday_panel,
                 self.settings_panel,
             ]
         )
+        self._set_active_page("홈")
+        self.today_card.update_from_config(self.cfg_mgr.config, self._preview_audio_for_today())
+        self.log_card.update_logs(self.cfg_mgr.config.shutdown_logs)
         self._create_tray()
+
+    def _wrap_scroll(self, content: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(content)
+        return scroll
+
+    def _toggle_drawer(self) -> None:
+        self.drawer.setVisible(not self.drawer.isVisible())
+
+    def _set_active_page(self, name: str) -> None:
+        index = self._page_indices.get(name)
+        if index is None:
+            return
+        self.content_stack.setCurrentIndex(index)
+        self.page_title.setText(name)
+        button = self._nav_buttons.get(name)
+        if button and not button.isChecked():
+            button.setChecked(True)
+        if self.drawer.isVisible():
+            self.drawer.hide()
+
+    def _preview_audio_for_today(self) -> Optional[str]:
+        cfg = self.cfg_mgr.config
+        today_key = DAY_KEYS[datetime.now().weekday()]
+        day_cfg = cfg.days.get(today_key)
+        if not day_cfg or not day_cfg.enabled:
+            return None
+        if not day_cfg.auto_assign and day_cfg.audio_path:
+            return day_cfg.audio_path
+        if cfg.playlist:
+            index = cfg.playlist_rotation % len(cfg.playlist)
+            return cfg.playlist[index]
+        return day_cfg.audio_path
+
+    def _on_next_run_changed(self, when: Optional[datetime]) -> None:
+        self.dashboard.update_next_run(when)
+        self.today_card.update_next_run(when)
+
+    def _update_today_summary(self) -> None:
+        self.today_card.update_from_config(self.cfg_mgr.config, self._preview_audio_for_today())
+
+    def _append_shutdown_log(self, kind: str, detail: str) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        def updater(cfg: SchedulerConfig) -> None:
+            entry = {"at": timestamp, "type": kind, "detail": detail}
+            cfg.shutdown_logs.insert(0, entry)
+            del cfg.shutdown_logs[30:]
+
+        self.cfg_mgr.update(updater)
+
+    def _clear_logs(self) -> None:
+        self.cfg_mgr.update(lambda cfg: setattr(cfg, "shutdown_logs", []))
+
+    def _on_day_card_changed(self, _: str) -> None:
+        self.scheduler._compute_next_run()
+        self._update_today_summary()
 
     def _create_tray(self) -> None:
         self.tray = QtWidgets.QSystemTrayIcon(create_tray_icon(self.cfg_mgr.config.theme_accent), self)
@@ -1176,7 +1451,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _connect_signals(self) -> None:
         self.dashboard.request_force_run.connect(self._force_execute)
         self.scheduler.schedule_triggered.connect(self._on_schedule_triggered)
-        self.scheduler.next_run_changed.connect(self.dashboard.update_next_run)
+        self.scheduler.next_run_changed.connect(self._on_next_run_changed)
         self.audio_service.playback_started.connect(self._on_playback_started)
         self.audio_service.playback_finished.connect(self._on_playback_finished)
         preview_signal = getattr(self.playlist_panel, "preview_requested", None)
@@ -1191,7 +1466,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.playlist_panel.add_stop_preview_listener(self._on_stop_preview)
         self.cfg_mgr.config_changed.connect(self._on_config_changed)
         for card in self.day_cards.values():
-            card.changed.connect(lambda _: self.scheduler._compute_next_run())
+            card.changed.connect(self._on_day_card_changed)
 
     def _apply_theme(self, accent: str) -> None:
         self._build_palette()
@@ -1206,6 +1481,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_panel.sync_from_config()
         for card in self.day_cards.values():
             card.sync_from_config()
+        self._update_today_summary()
+        self.log_card.update_logs(cfg.shutdown_logs)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - Qt callback
         event.ignore()
@@ -1274,8 +1551,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pending_follow_up = None
             self.overlay.hide()
             if allow_remote:
+                hosts = [host.get("host", "") for host in self.cfg_mgr.config.remote_hosts if host.get("host")]
+                detail = ", ".join(hosts) if hosts else "등록된 대상 없음"
+                self._append_shutdown_log("원격 종료", detail)
                 threading.Thread(target=shutdown_remote, args=(self.cfg_mgr.config.remote_hosts,), daemon=True).start()
             if allow_local:
+                self._append_shutdown_log(
+                    "본체 종료",
+                    f"{self.cfg_mgr.config.shutdown_delay}초 후 종료",
+                )
                 threading.Thread(target=shutdown_local, args=(self.cfg_mgr.config.shutdown_delay,), daemon=True).start()
             if self.tray:
                 self.tray.showMessage(APP_NAME, "일정 실행이 완료되었습니다.", QtWidgets.QSystemTrayIcon.Information, 3000)
@@ -1285,6 +1569,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tray.showMessage(APP_NAME, "미리 듣기가 종료되었습니다.", QtWidgets.QSystemTrayIcon.Information, 2000)
         self._playback_mode = "idle"
         self._active_day_key = None
+        self._update_today_summary()
 
     def _exit_all(self) -> None:
         self.scheduler.stop()
