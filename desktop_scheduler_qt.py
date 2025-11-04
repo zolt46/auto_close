@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 
@@ -103,7 +103,7 @@ class SchedulerConfig:
     holidays: List[str] = field(default_factory=list)
     holiday_ranges: List[Dict[str, str]] = field(default_factory=list)
     start_with_os: bool = False
-    theme_accent: str = "#6F7BF7"
+    theme_accent: str = "#2A5CAA"
     days: Dict[str, DaySchedule] = field(
         default_factory=lambda: {key: DaySchedule(enabled=(key not in {"sat", "sun"})) for key in DAY_KEYS}
     )
@@ -374,26 +374,13 @@ class FancyCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("FancyCard")
         self._accent = accent
-        self.setStyleSheet(
-            """
-            #FancyCard {
-                border-radius: 18px;
-                background: rgba(255, 255, 255, 0.1);
-                border: 1px solid rgba(255, 255, 255, 0.3);
-            }
-            #FancyCard QLabel[role="title"] {
-                color: white;
-                font-weight: 600;
-                font-size: 18px;
-            }
-            #FancyCard QLabel[role="subtitle"] {
-                color: rgba(255, 255, 255, 0.8);
-                font-size: 13px;
-            }
-            """
-        )
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+        self.accent_line = QtWidgets.QFrame()
+        self.accent_line.setFixedHeight(4)
+        self.accent_line.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        layout.addWidget(self.accent_line)
         self.title = QtWidgets.QLabel(title)
         self.title.setProperty("role", "title")
         layout.addWidget(self.title)
@@ -402,9 +389,39 @@ class FancyCard(QtWidgets.QFrame):
         layout.addWidget(self.subtitle)
         self.body_layout = QtWidgets.QVBoxLayout()
         layout.addLayout(self.body_layout)
+        self._apply_styles()
+
+    def _apply_styles(self) -> None:
+        accent = QtGui.QColor(self._accent)
+        border = accent.lighter(140).name()
+        title_color = accent.darker(120).name()
+        subtitle_color = "#4B5B75"
+        self.setStyleSheet(
+            f"""
+            QFrame#FancyCard {{
+                border-radius: 18px;
+                background: #FFFFFF;
+                border: 1px solid {border};
+            }}
+            QFrame#FancyCard QLabel[role="title"] {{
+                color: {title_color};
+                font-weight: 600;
+                font-size: 18px;
+            }}
+            QFrame#FancyCard QLabel[role="subtitle"] {{
+                color: {subtitle_color};
+                font-size: 13px;
+            }}
+            """
+        )
+        self.accent_line.setStyleSheet(f"background-color: {accent.name()}; border-radius: 2px;")
 
     def set_subtitle(self, text: str) -> None:
         self.subtitle.setText(text)
+
+    def set_accent(self, accent: str) -> None:
+        self._accent = accent
+        self._apply_styles()
 
 
 class DayCard(FancyCard):
@@ -414,6 +431,7 @@ class DayCard(FancyCard):
         super().__init__(DAY_LABEL[day_key], accent, parent)
         self.day_key = day_key
         self.cfg_mgr = cfg_mgr
+        self.set_subtitle("해당 요일의 실행 시간과 동작을 설정합니다")
         self._build_ui()
         self.sync_from_config()
 
@@ -449,6 +467,7 @@ class DayCard(FancyCard):
         self.file_edit = file_edit
         self.remote_chk = remote_chk
         self.local_chk = local_chk
+        self.browse_btn = browse_btn
         browse_btn.clicked.connect(self._pick_file)
         enable_chk.stateChanged.connect(lambda _: self._persist())
         auto_chk.stateChanged.connect(lambda _: self._persist())
@@ -456,6 +475,8 @@ class DayCard(FancyCard):
         local_chk.stateChanged.connect(lambda _: self._persist())
         time_edit.timeChanged.connect(lambda _: self._persist())
         file_edit.editingFinished.connect(self._persist)
+        auto_chk.stateChanged.connect(lambda _: self._update_mode())
+        self._update_mode()
 
     def sync_from_config(self) -> None:
         cfg = self.cfg_mgr.config.days[self.day_key]
@@ -466,6 +487,7 @@ class DayCard(FancyCard):
         self.file_edit.setText(cfg.audio_path or "")
         self.remote_chk.setChecked(cfg.allow_remote)
         self.local_chk.setChecked(cfg.allow_local_shutdown)
+        self._update_mode()
 
     def _pick_file(self) -> None:
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "음성 파일 선택", str(Path.home()), "Audio Files (*.mp3 *.wav *.ogg)")
@@ -473,6 +495,11 @@ class DayCard(FancyCard):
             self.file_edit.setText(file_path)
             self.auto_chk.setChecked(False)
             self._persist()
+
+    def _update_mode(self) -> None:
+        is_auto = self.auto_chk.isChecked()
+        self.file_edit.setEnabled(not is_auto)
+        self.browse_btn.setEnabled(not is_auto)
 
     def _persist(self) -> None:
         def updater(cfg: SchedulerConfig) -> None:
@@ -486,27 +513,34 @@ class DayCard(FancyCard):
         self.cfg_mgr.update(updater)
         self.changed.emit(self.day_key)
 
+    preview_requested = Signal(str)
+    stop_preview_requested = Signal()
 
 class PlaylistPanel(FancyCard):
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
         super().__init__("플레이리스트", accent, parent)
         self.cfg_mgr = cfg_mgr
-        self.set_subtitle("자동 음성 지정 시 순차적으로 사용")
+        self.set_subtitle("자동 음성 지정 시 순차 사용 · 미리 듣기 지원")
         layout = QtWidgets.QVBoxLayout()
         layout.setSpacing(12)
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.setAlternatingRowColors(True)
+        self.list_widget.itemDoubleClicked.connect(lambda _: self._preview_selected())
         layout.addWidget(self.list_widget)
         btn_row = QtWidgets.QHBoxLayout()
         add_btn = QtWidgets.QPushButton("추가")
         remove_btn = QtWidgets.QPushButton("삭제")
         up_btn = QtWidgets.QPushButton("▲")
         down_btn = QtWidgets.QPushButton("▼")
-        for btn in (add_btn, remove_btn, up_btn, down_btn):
+        preview_btn = QtWidgets.QPushButton("미리 듣기")
+        stop_btn = QtWidgets.QPushButton("정지")
+        for btn in (add_btn, remove_btn, up_btn, down_btn, preview_btn, stop_btn):
             btn.setCursor(Qt.PointingHandCursor)
         btn_row.addWidget(add_btn)
         btn_row.addWidget(remove_btn)
         btn_row.addStretch(1)
+        btn_row.addWidget(preview_btn)
+        btn_row.addWidget(stop_btn)
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
         layout.addLayout(btn_row)
@@ -517,6 +551,8 @@ class PlaylistPanel(FancyCard):
         remove_btn.clicked.connect(self._remove_selected)
         up_btn.clicked.connect(lambda: self._move_selected(-1))
         down_btn.clicked.connect(lambda: self._move_selected(1))
+        preview_btn.clicked.connect(self._preview_selected)
+        stop_btn.clicked.connect(self.stop_preview_requested.emit)
         self.refresh()
 
     def refresh(self) -> None:
@@ -524,6 +560,7 @@ class PlaylistPanel(FancyCard):
         for path in self.cfg_mgr.config.playlist:
             item = QtWidgets.QListWidgetItem(Path(path).name)
             item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
             self.list_widget.addItem(item)
 
     def _add_files(self) -> None:
@@ -560,6 +597,18 @@ class PlaylistPanel(FancyCard):
         self.cfg_mgr.update(updater)
         self.refresh()
         self.list_widget.setCurrentRow(target)
+
+    def _preview_selected(self) -> None:
+        item = self.list_widget.currentItem()
+        if not item:
+            QtWidgets.QMessageBox.information(self, "안내", "미리 듣기할 파일을 선택하세요.")
+            return
+        path = item.data(Qt.UserRole)
+        if not path or not Path(path).exists():
+            QtWidgets.QMessageBox.warning(self, "재생 불가", "파일을 찾을 수 없습니다. 경로를 확인해주세요.")
+            return
+        self.preview_requested.emit(path)
+
 
 
 class HolidayPanel(FancyCard):
@@ -661,8 +710,11 @@ class SettingsPanel(FancyCard):
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
         super().__init__("고급 설정", accent, parent)
         self.cfg_mgr = cfg_mgr
-        layout = QtWidgets.QFormLayout()
-        layout.setSpacing(12)
+        self.set_subtitle("종료 정책과 네트워크, 테마 설정")
+        outer = QtWidgets.QVBoxLayout()
+        outer.setSpacing(16)
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(12)
         self.target_edit = QtWidgets.QLineEdit(", ".join(cfg_mgr.config.targets))
         self.remote_toggle = QtWidgets.QCheckBox("원격 종료 활성화")
         self.remote_toggle.setChecked(cfg_mgr.config.enable_remote_shutdown)
@@ -675,14 +727,44 @@ class SettingsPanel(FancyCard):
         self.delay_spin.setValue(cfg_mgr.config.shutdown_delay)
         self.accent_btn = QtWidgets.QPushButton("테마 색상 변경")
         self.accent_btn.setCursor(Qt.PointingHandCursor)
-        layout.addRow("종료 대상 프로그램", self.target_edit)
-        layout.addRow("원격 종료", self.remote_toggle)
-        layout.addRow("본체 종료", self.local_toggle)
-        layout.addRow("종료 지연(초)", self.delay_spin)
-        layout.addRow("시작 프로그램 등록", self.startup_toggle)
-        layout.addRow("테마", self.accent_btn)
+        form.addRow("종료 대상 프로그램", self.target_edit)
+        form.addRow("원격 종료", self.remote_toggle)
+        form.addRow("본체 종료", self.local_toggle)
+        form.addRow("종료 지연(초)", self.delay_spin)
+        form.addRow("시작 프로그램 등록", self.startup_toggle)
+        form.addRow("테마", self.accent_btn)
+        outer.addLayout(form)
+        hosts_group = QtWidgets.QGroupBox("원격 PC 목록")
+        hosts_layout = QtWidgets.QVBoxLayout(hosts_group)
+        hosts_layout.setContentsMargins(12, 12, 12, 12)
+        hosts_layout.setSpacing(8)
+        hosts_hint = QtWidgets.QLabel("IP 또는 호스트 이름과 접속 정보를 입력하면 원격 종료에 활용됩니다.")
+        hosts_hint.setWordWrap(True)
+        hosts_layout.addWidget(hosts_hint)
+        self.host_table = QtWidgets.QTableWidget(0, 4)
+        self.host_table.setHorizontalHeaderLabels(["IP/호스트", "계정", "비밀번호", "방식"])
+        self.host_table.horizontalHeader().setStretchLastSection(True)
+        self.host_table.verticalHeader().setVisible(False)
+        self.host_table.setAlternatingRowColors(True)
+        self.host_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.host_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditKeyPressed
+        )
+        hosts_layout.addWidget(self.host_table)
+        host_btn_row = QtWidgets.QHBoxLayout()
+        self.add_host_btn = QtWidgets.QPushButton("추가")
+        self.remove_host_btn = QtWidgets.QPushButton("삭제")
+        for btn in (self.add_host_btn, self.remove_host_btn):
+            btn.setCursor(Qt.PointingHandCursor)
+        host_btn_row.addWidget(self.add_host_btn)
+        host_btn_row.addWidget(self.remove_host_btn)
+        host_btn_row.addStretch(1)
+        hosts_layout.addLayout(host_btn_row)
+        outer.addWidget(hosts_group)
         container = QtWidgets.QWidget()
-        container.setLayout(layout)
+        container.setLayout(outer)
         self.body_layout.addWidget(container)
         self.target_edit.editingFinished.connect(self._persist_targets)
         self.remote_toggle.stateChanged.connect(lambda _: self._persist())
@@ -690,6 +772,11 @@ class SettingsPanel(FancyCard):
         self.startup_toggle.stateChanged.connect(lambda _: self._persist())
         self.delay_spin.valueChanged.connect(lambda _: self._persist())
         self.accent_btn.clicked.connect(self._pick_color)
+        self.add_host_btn.clicked.connect(self._add_host)
+        self.remove_host_btn.clicked.connect(self._remove_host)
+        self.host_table.itemChanged.connect(lambda _: self._persist_hosts())
+        self._loading_hosts = False
+        self._load_hosts()
 
     def _persist_targets(self) -> None:
         raw = [p.strip() for p in self.target_edit.text().split(",") if p.strip()]
@@ -714,6 +801,81 @@ class SettingsPanel(FancyCard):
         if color.isValid():
             hex_color = color.name()
             self.cfg_mgr.update(lambda cfg: setattr(cfg, "theme_accent", hex_color))
+
+    def sync_from_config(self) -> None:
+        cfg = self.cfg_mgr.config
+        self.target_edit.blockSignals(True)
+        self.target_edit.setText(", ".join(cfg.targets))
+        self.target_edit.blockSignals(False)
+        for toggle, value in (
+            (self.remote_toggle, cfg.enable_remote_shutdown),
+            (self.local_toggle, cfg.enable_local_shutdown),
+            (self.startup_toggle, cfg.start_with_os),
+        ):
+            toggle.blockSignals(True)
+            toggle.setChecked(value)
+            toggle.blockSignals(False)
+        self.delay_spin.blockSignals(True)
+        self.delay_spin.setValue(cfg.shutdown_delay)
+        self.delay_spin.blockSignals(False)
+        self._load_hosts()
+
+    def _load_hosts(self) -> None:
+        self._loading_hosts = True
+        self.host_table.setRowCount(0)
+        for host in self.cfg_mgr.config.remote_hosts:
+            row = self.host_table.rowCount()
+            self.host_table.insertRow(row)
+            for col, key in enumerate(["host", "username", "password", "method"]):
+                value = host.get(key, "")
+                if key == "method" and not value:
+                    value = "ssh"
+                item = QtWidgets.QTableWidgetItem(value)
+                self.host_table.setItem(row, col, item)
+        self._loading_hosts = False
+
+    def _table_text(self, row: int, column: int) -> str:
+        item = self.host_table.item(row, column)
+        return item.text().strip() if item else ""
+
+    def _persist_hosts(self) -> None:
+        if getattr(self, "_loading_hosts", False):
+            return
+        hosts: List[Dict[str, str]] = []
+        for row in range(self.host_table.rowCount()):
+            host_entry = {
+                "host": self._table_text(row, 0),
+                "username": self._table_text(row, 1) or "",
+                "password": self._table_text(row, 2) or "",
+                "method": self._table_text(row, 3) or "ssh",
+            }
+            if not host_entry["host"]:
+                continue
+            hosts.append(host_entry)
+        self.cfg_mgr.update(lambda cfg: setattr(cfg, "remote_hosts", hosts))
+
+    def _add_host(self) -> None:
+        row = self.host_table.rowCount()
+        self.host_table.insertRow(row)
+        defaults = ["", "admin", "", "ssh"]
+        self._loading_hosts = True
+        for col, value in enumerate(defaults):
+            item = QtWidgets.QTableWidgetItem(value)
+            self.host_table.setItem(row, col, item)
+        self._loading_hosts = False
+        self.host_table.setCurrentCell(row, 0)
+        self.host_table.editItem(self.host_table.item(row, 0))
+
+    def _remove_host(self) -> None:
+        rows = sorted({index.row() for index in self.host_table.selectedIndexes()}, reverse=True)
+        if not rows:
+            QtWidgets.QMessageBox.information(self, "안내", "삭제할 항목을 선택하세요.")
+            return
+        self._loading_hosts = True
+        for row in rows:
+            self.host_table.removeRow(row)
+        self._loading_hosts = False
+        self._persist_hosts()
 
 
 class DateRangeDialog(QtWidgets.QDialog):
@@ -748,6 +910,7 @@ class DashboardCard(FancyCard):
 
     def __init__(self, accent: str, parent=None) -> None:
         super().__init__("다음 실행", accent, parent)
+        self.set_subtitle("예약된 스케줄 정보를 확인합니다")
         self.timer_label = QtWidgets.QLabel("다음 일정 계산 중…")
         self.timer_label.setProperty("role", "title")
         self.timer_label.setAlignment(Qt.AlignCenter)
@@ -782,7 +945,9 @@ class StatusOverlay(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
         self.label = QtWidgets.QLabel("작업 중")
-        self.label.setStyleSheet("color: white; font-size: 22px; font-weight: 600;")
+        self.label.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background-color: rgba(15, 41, 64, 220); border-radius: 18px;")
+        self.label.setStyleSheet("color: white; font-size: 20px; font-weight: 600;")
         layout.addWidget(self.label)
         self.resize(280, 120)
 
@@ -817,10 +982,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, cfg_mgr: ConfigManager) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
+        self.setFixedSize(1180, 860)
         self.cfg_mgr = cfg_mgr
         self.scheduler = SchedulerEngine(cfg_mgr)
         self.audio_service = AudioService()
         self.overlay = StatusOverlay()
+        self._pending_follow_up: Optional[Tuple[bool, bool]] = None
+        self._playback_mode: str = "idle"
+        self._active_day_key: Optional[str] = None
+        self._cards: List[FancyCard] = []
+        self._ignore_playback_finished = False
         self._build_palette()
         self._build_ui()
         self._connect_signals()
@@ -828,72 +999,118 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_palette(self) -> None:
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
+        background = QtGui.QColor("#E7EEF8")
+        base = QtGui.QColor("#FFFFFF")
+        text = QtGui.QColor("#0F2940")
+        outline = QtGui.QColor("#C7D7EE")
         palette = self.palette()
-        palette.setColor(QPalette.Window, QtGui.QColor("#1E1E2E"))
-        palette.setColor(QPalette.WindowText, Qt.white)
-        palette.setColor(QPalette.Base, QtGui.QColor(30, 32, 46, 200))
-        palette.setColor(QPalette.Text, Qt.white)
+        palette.setColor(QPalette.Window, background)
+        palette.setColor(QPalette.WindowText, text)
+        palette.setColor(QPalette.Base, base)
+        palette.setColor(QPalette.Text, text)
         palette.setColor(QPalette.Button, accent)
         palette.setColor(QPalette.ButtonText, Qt.white)
+        palette.setColor(QPalette.Highlight, accent)
+        palette.setColor(QPalette.HighlightedText, Qt.white)
         self.setPalette(palette)
+        accent_hex = accent.name()
+        accent_hover = QtGui.QColor(accent).lighter(120).name()
+        accent_border = QtGui.QColor(accent).darker(120).name()
+        accent_disabled_bg = QtGui.QColor(accent).lighter(200).name()
+        accent_disabled_border = QtGui.QColor(accent).lighter(170).name()
+        tab_bg = QtGui.QColor(accent).lighter(190).name()
+        tab_selected = QtGui.QColor(accent).lighter(150).name()
+        tab_hover = QtGui.QColor(accent).lighter(210).name()
+        list_selected = QtGui.QColor(accent).lighter(140).name()
+        text_hex = text.name()
+        outline_hex = outline.name()
         self.setStyleSheet(
-            """
-            QMainWindow { background: #1E1E2E; }
-            QPushButton {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(255,255,255,0.15), stop:1 rgba(255,255,255,0.05));
-                border: 1px solid rgba(255,255,255,0.2);
+            f"""
+            QMainWindow {{ background: {background.name()}; }}
+            QPushButton {{
+                background-color: {accent_hex};
+                border: 1px solid {accent_border};
                 color: white;
                 padding: 8px 16px;
+                border-radius: 10px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {accent_hover}; }}
+            QPushButton:disabled {{
+                background-color: {accent_disabled_bg};
+                border: 1px solid {accent_disabled_border};
+                color: rgba(255, 255, 255, 0.75);
+            }}
+            QCheckBox, QLabel {{ color: {text_hex}; }}
+            QListWidget {{
+                background: #FFFFFF;
+                color: {text_hex};
                 border-radius: 12px;
-            }
-            QPushButton:hover { background: rgba(255,255,255,0.25); }
-            QCheckBox, QLabel { color: white; }
-            QListWidget { background: rgba(20, 22, 34, 0.8); color: white; border-radius: 12px; padding: 8px; }
-            QLineEdit, QTimeEdit, QSpinBox {
-                background: rgba(20, 22, 34, 0.8);
-                color: white;
+                border: 1px solid {outline_hex};
+                padding: 8px;
+            }}
+            QLineEdit, QTimeEdit, QSpinBox {{
+                background: #FFFFFF;
+                color: {text_hex};
                 border-radius: 10px;
                 padding: 6px 10px;
-                border: 1px solid rgba(255,255,255,0.2);
-            }
-            QTabWidget::pane {
-                border: none;
-                background: transparent;
-            }
-            QTabBar::tab {
-                background: rgba(255,255,255,0.08);
-                color: white;
-                min-width: 120px;
+                border: 1px solid {outline_hex};
+            }}
+            QLineEdit:disabled, QTimeEdit:disabled, QSpinBox:disabled {{
+                background: #F3F6FC;
+                color: #7588A6;
+            }}
+            QTabWidget::pane {{ border: none; background: transparent; }}
+            QTabBar::tab {{
+                background: {tab_bg};
+                color: {text_hex};
+                min-width: 140px;
                 padding: 10px 14px;
                 border-radius: 14px;
-            }
-            QTabBar::tab:selected { background: rgba(255,255,255,0.22); }
-            QListWidget::item:selected { background: rgba(111, 123, 247, 0.6); }
-            QMenu {
-                background: rgba(20,22,34,0.95);
+                margin: 0 4px;
+            }}
+            QTabBar::tab:selected {{ background: {tab_selected}; font-weight: 600; }}
+            QTabBar::tab:hover {{ background: {tab_hover}; }}
+            QListWidget::item:selected {{
+                background: {list_selected};
                 color: white;
-                border: 1px solid rgba(255,255,255,0.1);
-            }
-            """
+            }}
+            QMenu {{
+                background: #FFFFFF;
+                color: {text_hex};
+                border: 1px solid {outline_hex};
+            }}
+            QScrollArea {{ background: transparent; }}
+        """
         )
 
     def _build_ui(self) -> None:
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(20)
         self.dashboard = DashboardCard(self.cfg_mgr.config.theme_accent)
         layout.addWidget(self.dashboard)
         tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.setTabPosition(QtWidgets.QTabWidget.North)
         day_widget = QtWidgets.QWidget()
         day_layout = QtWidgets.QGridLayout(day_widget)
         day_layout.setSpacing(16)
+        day_layout.setContentsMargins(8, 8, 8, 8)
+        day_layout.setColumnStretch(0, 1)
+        day_layout.setColumnStretch(1, 1)
         self.day_cards = {}
         for idx, key in enumerate(DAY_KEYS):
             card = DayCard(key, self.cfg_mgr, self.cfg_mgr.config.theme_accent)
             row, col = divmod(idx, 2)
             day_layout.addWidget(card, row, col)
             self.day_cards[key] = card
+            self._cards.append(card)
         tabs.addTab(day_widget, "요일별")
         self.playlist_panel = PlaylistPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
         tabs.addTab(self.playlist_panel, "플레이리스트")
@@ -902,7 +1119,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_panel = SettingsPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
         tabs.addTab(self.settings_panel, "설정")
         layout.addWidget(tabs)
-        self.setCentralWidget(central)
+        layout.addStretch(1)
+        scroll_area.setWidget(central)
+        self.setCentralWidget(scroll_area)
+        self._cards.extend(
+            [
+                self.dashboard,
+                self.playlist_panel,
+                self.holiday_panel,
+                self.settings_panel,
+            ]
+        )
         self._create_tray()
 
     def _create_tray(self) -> None:
@@ -923,15 +1150,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dashboard.request_force_run.connect(self._force_execute)
         self.scheduler.schedule_triggered.connect(self._on_schedule_triggered)
         self.scheduler.next_run_changed.connect(self.dashboard.update_next_run)
-        self.audio_service.playback_started.connect(lambda _: self.overlay.show_message("음성 재생 중"))
-        self.audio_service.playback_finished.connect(lambda _: self.overlay.hide())
-        self.cfg_mgr.config_changed.connect(lambda cfg: self._apply_theme(cfg.theme_accent))
+        self.audio_service.playback_started.connect(self._on_playback_started)
+        self.audio_service.playback_finished.connect(self._on_playback_finished)
+        self.playlist_panel.preview_requested.connect(self._on_preview_requested)
+        self.playlist_panel.stop_preview_requested.connect(self._on_stop_preview)
+        self.cfg_mgr.config_changed.connect(self._on_config_changed)
         for card in self.day_cards.values():
             card.changed.connect(lambda _: self.scheduler._compute_next_run())
 
     def _apply_theme(self, accent: str) -> None:
         self._build_palette()
         self.tray.setIcon(create_tray_icon(accent))
+        for card in self._cards:
+            card.set_accent(accent)
+
+    def _on_config_changed(self, cfg: SchedulerConfig) -> None:
+        self._apply_theme(cfg.theme_accent)
+        self.playlist_panel.refresh()
+        self.holiday_panel.refresh()
+        self.settings_panel.sync_from_config()
+        for card in self.day_cards.values():
+            card.sync_from_config()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - Qt callback
         event.ignore()
@@ -939,19 +1178,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tray.showMessage(APP_NAME, "프로그램은 계속 백그라운드에서 실행됩니다.")
 
     def _on_schedule_triggered(self, day_key: str, audio_path: str, allow_remote: bool, allow_local: bool) -> None:
-        self.overlay.show_message(f"{DAY_LABEL[day_key]} 일정 실행 중")
+        if self.audio_service.player.playbackState() != QMediaPlayer.StoppedState:
+            if self._playback_mode == "schedule":
+                self._pending_follow_up = None
+            if self._playback_mode != "idle":
+                self._ignore_playback_finished = True
+            self.overlay.hide()
+            self.audio_service.stop()
+        self._active_day_key = day_key
+        self._pending_follow_up = (allow_remote, allow_local)
+        self._playback_mode = "schedule"
+        day_label = DAY_LABEL[day_key]
         terminate_programs(self.cfg_mgr.config.targets)
+        if audio_path:
+            self.overlay.show_message(f"{day_label} 일정 실행 준비 - {Path(audio_path).name}")
+        else:
+            self.overlay.show_message(f"{day_label} 일정 실행 준비")
+        if self.tray:
+            self.tray.showMessage(APP_NAME, f"{day_label} 일정이 시작되었습니다.", QtWidgets.QSystemTrayIcon.Information, 3000)
         self.audio_service.play(audio_path)
-        def _follow_up(_: str) -> None:
-            if allow_remote:
-                threading.Thread(target=shutdown_remote, args=(self.cfg_mgr.config.remote_hosts,), daemon=True).start()
-            if allow_local:
-                threading.Thread(target=shutdown_local, args=(self.cfg_mgr.config.shutdown_delay,), daemon=True).start()
-        self.audio_service.playback_finished.connect(_follow_up, QtCore.Qt.UniqueConnection)
 
     def _force_execute(self) -> None:
         now_key = DAY_KEYS[datetime.now().weekday()]
         self._on_schedule_triggered(now_key, self.scheduler._resolve_audio(self.cfg_mgr.config, self.cfg_mgr.config.days[now_key]) or "", True, True)
+
+    def _on_preview_requested(self, path: str) -> None:
+        if self._playback_mode == "schedule":
+            QtWidgets.QMessageBox.warning(self, "진행 중", "일정 실행 중에는 미리 듣기를 사용할 수 없습니다.")
+            return
+        if self.audio_service.player.playbackState() != QMediaPlayer.StoppedState:
+            self._ignore_playback_finished = True
+            self.audio_service.stop()
+        self._pending_follow_up = None
+        self._active_day_key = None
+        self.overlay.hide()
+        self._playback_mode = "preview"
+        self.audio_service.play(path)
+        if self.tray:
+            self.tray.showMessage(APP_NAME, f"미리 듣기: {Path(path).name}", QtWidgets.QSystemTrayIcon.Information, 3000)
+
+    def _on_stop_preview(self) -> None:
+        if self._playback_mode == "preview":
+            self.audio_service.stop()
+        else:
+            QtWidgets.QMessageBox.information(self, "안내", "현재 미리 듣기 중이 아닙니다.")
+
+    def _on_playback_started(self, path: str) -> None:
+        if self._playback_mode != "schedule":
+            return
+        day_label = DAY_LABEL.get(self._active_day_key or "", "일정")
+        name = Path(path).name if path else "음성 없음"
+        self.overlay.show_message(f"{day_label} - {name} 재생 중")
+
+    def _on_playback_finished(self, _: str) -> None:
+        if self._ignore_playback_finished:
+            self._ignore_playback_finished = False
+            return
+        if self._playback_mode == "schedule":
+            allow_remote, allow_local = self._pending_follow_up or (False, False)
+            self._pending_follow_up = None
+            self.overlay.hide()
+            if allow_remote:
+                threading.Thread(target=shutdown_remote, args=(self.cfg_mgr.config.remote_hosts,), daemon=True).start()
+            if allow_local:
+                threading.Thread(target=shutdown_local, args=(self.cfg_mgr.config.shutdown_delay,), daemon=True).start()
+            if self.tray:
+                self.tray.showMessage(APP_NAME, "일정 실행이 완료되었습니다.", QtWidgets.QSystemTrayIcon.Information, 3000)
+            self.scheduler._compute_next_run()
+        elif self._playback_mode == "preview":
+            if self.tray:
+                self.tray.showMessage(APP_NAME, "미리 듣기가 종료되었습니다.", QtWidgets.QSystemTrayIcon.Information, 2000)
+        self._playback_mode = "idle"
+        self._active_day_key = None
 
     def _exit_all(self) -> None:
         self.scheduler.stop()
