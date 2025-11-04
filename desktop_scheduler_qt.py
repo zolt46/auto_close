@@ -552,7 +552,7 @@ class PlaylistPanel(FancyCard):
         up_btn.clicked.connect(lambda: self._move_selected(-1))
         down_btn.clicked.connect(lambda: self._move_selected(1))
         preview_btn.clicked.connect(self._preview_selected)
-        stop_btn.clicked.connect(self.stop_preview_requested.emit)
+        stop_btn.clicked.connect(self._emit_stop_preview)
         self.refresh()
 
     def refresh(self) -> None:
@@ -608,6 +608,14 @@ class PlaylistPanel(FancyCard):
             QtWidgets.QMessageBox.warning(self, "재생 불가", "파일을 찾을 수 없습니다. 경로를 확인해주세요.")
             return
         self.preview_requested.emit(path)
+
+    def _emit_stop_preview(self) -> None:
+        # 일부 PySide6 배포본에서는 사용자 정의 Signal 속성이 지연 초기화되면서
+        # 객체 생성 직후에는 hasattr 체크가 필요할 수 있다. getattr을 사용해
+        # 존재할 때만 emit을 호출해 예외를 방지한다.
+        signal = getattr(self, "stop_preview_requested", None)
+        if signal is not None:
+            signal.emit()
 
 
 
