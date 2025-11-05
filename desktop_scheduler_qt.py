@@ -1527,28 +1527,72 @@ class PasswordChangeDialog(QtWidgets.QDialog):
         self.new_password = new_value
         self.accept()
 
+def _apply_popup_typography(dialog: QtWidgets.QDialog) -> None:
+    dialog.setStyleSheet(
+        """
+        QLabel[popup-role="body"] {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1B1F24;
+            font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+            line-height: 1.45;
+        }
+        QLabel[popup-role="hint"] {
+            font-size: 16px;
+            font-weight: 500;
+            color: #1B1F24;
+            font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+            line-height: 1.6;
+        }
+        QLabel[popup-role="error"] {
+            font-size: 14px;
+            font-weight: 600;
+            color: #C62828;
+            font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+        }
+        QLineEdit {
+            font-size: 16px;
+            padding: 8px 10px;
+            border-radius: 6px;
+        }
+        QDialogButtonBox QPushButton {
+            font-size: 15px;
+            font-weight: 600;
+            min-height: 32px;
+            padding: 4px 14px;
+        }
+        """
+    )
+
 
 class PasswordPrompt(QtWidgets.QDialog):
     def __init__(self, title: str, prompt: str, validator: Callable[[str], bool], parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
+        self.setMinimumWidth(360)
         self.validator = validator
         layout = QtWidgets.QVBoxLayout(self)
         message = QtWidgets.QLabel(prompt)
+        message.setProperty("popup-role", "body")
         message.setWordWrap(True)
         layout.addWidget(message)
         self.password_edit = QtWidgets.QLineEdit()
         self.password_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.password_edit.returnPressed.connect(self._attempt_login)
         layout.addWidget(self.password_edit)
+        hint = QtWidgets.QLabel("비밀번호를 정확히 입력한 후 Enter 키를 누를 수 있습니다.")
+        hint.setProperty("popup-role", "hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         self.error_label = QtWidgets.QLabel()
-        self.error_label.setStyleSheet("color: #C62828;")
+        self.error_label.setProperty("popup-role", "error")
         layout.addWidget(self.error_label)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._attempt_login)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        _apply_popup_typography(self)
         self.password_edit.setFocus()
 
     def _attempt_login(self) -> None:
@@ -1566,14 +1610,18 @@ class HelpDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
+        self.setMinimumWidth(420)
         layout = QtWidgets.QVBoxLayout(self)
         label = QtWidgets.QLabel("\n".join(lines))
+        label.setProperty("popup-role", "hint")
         label.setWordWrap(True)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(label)
         close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         close_btn.rejected.connect(self.reject)
         close_btn.accepted.connect(self.accept)
         layout.addWidget(close_btn)
+        _apply_popup_typography(self)
 
 
 class DashboardCard(FancyCard):
