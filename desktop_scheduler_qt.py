@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sys
@@ -142,6 +143,54 @@ class SchedulerConfig:
         base.days = days
         return base
 
+def is_holiday(cfg: SchedulerConfig, target: date) -> bool:
+    if target.isoformat() in cfg.holidays:
+        return True
+    for rng in cfg.holiday_ranges:
+        try:
+            start = datetime.strptime(rng["start"], "%Y-%m-%d").date()
+            end = datetime.strptime(rng["end"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if start <= target <= end:
+            return True
+    return False
+
+
+def is_day_eligible(cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: date) -> bool:
+    if not day_cfg.enabled:
+        return False
+    if cfg.holidays_enabled and is_holiday(cfg, current_date):
+        return False
+    if day_cfg.last_ran == current_date.isoformat():
+        return False
+    return True
+
+
+def predict_playlist_for_day(cfg: SchedulerConfig, target_day: str) -> Optional[str]:
+    playlist_len = len(cfg.playlist)
+    if target_day not in DAY_KEYS:
+        return None
+    rotation = cfg.playlist_rotation % max(1, playlist_len)
+    now = datetime.now()
+    index = rotation
+    for offset in range(0, 28):
+        current = now + timedelta(days=offset)
+        day_key = DAY_KEYS[current.weekday()]
+        day_cfg = cfg.days.get(day_key)
+        if not day_cfg or not is_day_eligible(cfg, day_cfg, current.date()):
+            continue
+        if day_cfg.auto_assign:
+            candidate = cfg.playlist[index % playlist_len] if playlist_len else None
+            if day_key == target_day:
+                return candidate
+            if playlist_len:
+                index = (index + 1) % playlist_len
+        else:
+            if day_key == target_day:
+                return day_cfg.audio_path
+    return None
+
 
 class ConfigManager(QtCore.QObject):
     config_changed = Signal(SchedulerConfig)
@@ -150,6 +199,7 @@ class ConfigManager(QtCore.QObject):
         super().__init__()
         self._lock = threading.Lock()
         self.config = self._load()
+        atexit.register(self._flush_on_exit)
 
     def _load(self) -> SchedulerConfig:
         if CONFIG_FILE.exists():
@@ -160,18 +210,31 @@ class ConfigManager(QtCore.QObject):
                 print("[설정 읽기 실패]", exc)
         return SchedulerConfig()
 
+    def _write(self, config: SchedulerConfig) -> None:
+        CONFIG_FILE.write_text(
+            json.dumps(config.as_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def save(self) -> None:
         with self._lock:
-            CONFIG_FILE.write_text(json.dumps(self.config.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        self.config_changed.emit(self.config)
+            self._write(self.config)
+            config = self.config
+        self.config_changed.emit(config)
 
     def update(self, updater) -> None:
         with self._lock:
             updater(self.config)
-            CONFIG_FILE.write_text(json.dumps(self.config.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
             config = self.config
+            self._write(config)
         self.config_changed.emit(config)
 
+    def _flush_on_exit(self) -> None:
+        with self._lock:
+            try:
+                self._write(self.config)
+            except Exception:
+                pass
 
 class SchedulerEngine(QtCore.QObject):
     schedule_triggered = Signal(str, str, bool, bool)  # day_key, audio_path, allow_remote, allow_local
@@ -220,26 +283,10 @@ class SchedulerEngine(QtCore.QObject):
         self.next_run_changed.emit(best)
 
     def _is_day_eligible(self, cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: date) -> bool:
-        if not day_cfg.enabled:
-            return False
-        if cfg.holidays_enabled and self._is_holiday(cfg, current_date):
-            return False
-        if day_cfg.last_ran == current_date.isoformat():
-            return False
-        return True
+        return is_day_eligible(cfg, day_cfg, current_date)
 
     def _is_holiday(self, cfg: SchedulerConfig, target: date) -> bool:
-        if target.isoformat() in cfg.holidays:
-            return True
-        for rng in cfg.holiday_ranges:
-            try:
-                start = datetime.strptime(rng["start"], "%Y-%m-%d").date()
-                end = datetime.strptime(rng["end"], "%Y-%m-%d").date()
-                if start <= target <= end:
-                    return True
-            except Exception:
-                continue
-        return False
+        return is_holiday(cfg, target)
 
     def _check_trigger(self) -> None:
         now = datetime.now()
@@ -446,75 +493,122 @@ class DayCard(FancyCard):
         auto_chk = QtWidgets.QCheckBox("자동 음성")
         time_edit = QtWidgets.QTimeEdit()
         time_edit.setDisplayFormat("HH:mm")
-        file_edit = QtWidgets.QLineEdit()
-        file_edit.setPlaceholderText("직접 파일 지정 (자동 음성 해제 시)")
-        browse_btn = QtWidgets.QPushButton("찾기")
+        manual_combo = QtWidgets.QComboBox()
+        manual_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        manual_combo.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        manual_combo.setEditable(False)
+        manual_combo.addItem("선택 안 함", None)
+        manual_combo.setCurrentIndex(0)
         remote_chk = QtWidgets.QCheckBox("원격 종료 허용")
         local_chk = QtWidgets.QCheckBox("본체 종료")
+        auto_hint = QtWidgets.QLabel()
+        auto_hint.setProperty("role", "subtitle")
+        auto_hint.setWordWrap(True)
+        auto_hint.hide()
         for widget in (enable_chk, auto_chk, remote_chk, local_chk):
             widget.setCursor(Qt.PointingHandCursor)
-        browse_btn.setCursor(Qt.PointingHandCursor)
         layout.addWidget(enable_chk, 0, 0)
         layout.addWidget(auto_chk, 0, 1)
         layout.addWidget(time_edit, 0, 2)
         layout.addWidget(remote_chk, 1, 0)
         layout.addWidget(local_chk, 1, 1)
-        layout.addWidget(file_edit, 2, 0, 1, 2)
-        layout.addWidget(browse_btn, 2, 2)
+        layout.addWidget(manual_combo, 2, 0, 1, 3)
+        layout.addWidget(auto_hint, 3, 0, 1, 3)
         container = QtWidgets.QWidget()
         container.setLayout(layout)
         self.body_layout.addWidget(container)
         self.enable_chk = enable_chk
         self.auto_chk = auto_chk
         self.time_edit = time_edit
-        self.file_edit = file_edit
+        self.manual_combo = manual_combo
         self.remote_chk = remote_chk
         self.local_chk = local_chk
-        self.browse_btn = browse_btn
-        browse_btn.clicked.connect(self._pick_file)
+        self.auto_hint = auto_hint
         enable_chk.stateChanged.connect(lambda _: self._persist())
         auto_chk.stateChanged.connect(lambda _: self._persist())
         remote_chk.stateChanged.connect(lambda _: self._persist())
         local_chk.stateChanged.connect(lambda _: self._persist())
         time_edit.timeChanged.connect(lambda _: self._persist())
-        file_edit.editingFinished.connect(self._persist)
+        manual_combo.currentIndexChanged.connect(lambda _: self._persist())
         auto_chk.stateChanged.connect(lambda _: self._update_mode())
         self._update_mode()
 
     def sync_from_config(self) -> None:
         cfg = self.cfg_mgr.config.days[self.day_key]
+        self.enable_chk.blockSignals(True)
         self.enable_chk.setChecked(cfg.enabled)
+        self.enable_chk.blockSignals(False)
+        self.auto_chk.blockSignals(True)
         self.auto_chk.setChecked(cfg.auto_assign)
+        self.auto_chk.blockSignals(False)
         hh, mm = map(int, cfg.time.split(":"))
+        self.time_edit.blockSignals(True)
         self.time_edit.setTime(QtCore.QTime(hh, mm))
-        self.file_edit.setText(cfg.audio_path or "")
+        self.time_edit.blockSignals(False)
+        self._populate_manual_options(cfg.audio_path)
+        self.remote_chk.blockSignals(True)
         self.remote_chk.setChecked(cfg.allow_remote)
+        self.remote_chk.blockSignals(False)
+        self.local_chk.blockSignals(True)
         self.local_chk.setChecked(cfg.allow_local_shutdown)
+        self.local_chk.blockSignals(False)
         self._update_mode()
 
-    def _pick_file(self) -> None:
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "음성 파일 선택", str(Path.home()), "Audio Files (*.mp3 *.wav *.ogg)")
-        if file_path:
-            self.file_edit.setText(file_path)
-            self.auto_chk.setChecked(False)
-            self._persist()
+    def _populate_manual_options(self, selected_path: Optional[str]) -> None:
+        playlist = self.cfg_mgr.config.playlist
+        self.manual_combo.blockSignals(True)
+        current_data = self.manual_combo.currentData()
+        self.manual_combo.clear()
+        self.manual_combo.addItem("선택 안 함", None)
+        for path in playlist:
+            self.manual_combo.addItem(Path(path).name, path)
+        target = selected_path or current_data
+        index = self.manual_combo.findData(target, Qt.UserRole)
+        if index < 0:
+            index = 0
+        self.manual_combo.setCurrentIndex(index)
+        self.manual_combo.blockSignals(False)
+        self.manual_combo.setToolTip(self.manual_combo.currentData() or "")
 
     def _update_mode(self) -> None:
         is_auto = self.auto_chk.isChecked()
-        self.file_edit.setEnabled(not is_auto)
-        self.browse_btn.setEnabled(not is_auto)
+        has_playlist = self.manual_combo.count() > 1
+        self.manual_combo.setEnabled(not is_auto and has_playlist)
+        if not has_playlist:
+            self.manual_combo.setToolTip("플레이리스트를 먼저 구성하세요")
+        self.auto_hint.setVisible(is_auto)
+        self._update_auto_hint()
 
     def _persist(self) -> None:
         def updater(cfg: SchedulerConfig) -> None:
             day_cfg = cfg.days[self.day_key]
             day_cfg.enabled = self.enable_chk.isChecked()
             day_cfg.auto_assign = self.auto_chk.isChecked()
-            day_cfg.audio_path = self.file_edit.text().strip() or None
+            selected = self.manual_combo.currentData()
+            day_cfg.audio_path = selected if selected else None
             day_cfg.time = self.time_edit.time().toString("HH:mm")
             day_cfg.allow_remote = self.remote_chk.isChecked()
             day_cfg.allow_local_shutdown = self.local_chk.isChecked()
         self.cfg_mgr.update(updater)
         self.changed.emit(self.day_key)
+        self._update_mode()
+
+    def _update_auto_hint(self) -> None:
+        day_cfg = self.cfg_mgr.config.days[self.day_key]
+        if not day_cfg.enabled:
+            self.auto_hint.setText("일정이 비활성화되어 있습니다")
+            return
+        if not day_cfg.auto_assign:
+            self.auto_hint.hide()
+            return
+        next_audio = predict_playlist_for_day(self.cfg_mgr.config, self.day_key)
+        if next_audio:
+            name = Path(next_audio).name
+            self.auto_hint.setText(f"자동 음성: {name}")
+            self.auto_hint.setToolTip(next_audio)
+        else:
+            self.auto_hint.setText("자동으로 사용할 음성이 없습니다. 플레이리스트를 확인하세요.")
+            self.auto_hint.setToolTip("")
 
     preview_requested = Signal(str)
     stop_preview_requested = Signal()
@@ -805,6 +899,11 @@ class SettingsPanel(FancyCard):
         self.add_host_btn.clicked.connect(self._add_host)
         self.remove_host_btn.clicked.connect(self._remove_host)
         self.host_table.itemChanged.connect(lambda _: self._persist_hosts())
+        self._targets_timer = QtCore.QTimer(self)
+        self._targets_timer.setSingleShot(True)
+        self._targets_timer.setInterval(400)
+        self._targets_timer.timeout.connect(self._persist_targets)
+        self.target_edit.textChanged.connect(lambda _: self._targets_timer.start())
         self._loading_hosts = False
         self._load_hosts()
 
@@ -1403,12 +1502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         day_cfg = cfg.days.get(today_key)
         if not day_cfg or not day_cfg.enabled:
             return None
-        if not day_cfg.auto_assign and day_cfg.audio_path:
-            return day_cfg.audio_path
-        if cfg.playlist:
-            index = cfg.playlist_rotation % len(cfg.playlist)
-            return cfg.playlist[index]
-        return day_cfg.audio_path
+        return predict_playlist_for_day(cfg, today_key)
 
     def _on_next_run_changed(self, when: Optional[datetime]) -> None:
         self.dashboard.update_next_run(when)
