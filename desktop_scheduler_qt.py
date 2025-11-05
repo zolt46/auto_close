@@ -44,12 +44,56 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
-CONFIG_DIR = (
-    Path(os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    / "auto_close_studio"
-)
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-CONFIG_FILE = CONFIG_DIR / "settings.json"
+
+
+class ConfigLocator:
+    """현재 설정 파일 위치를 추적하고 변경을 돕는 도우미."""
+
+    def __init__(self) -> None:
+        base_root = Path(
+            os.environ.get("APPDATA")
+            or os.environ.get("XDG_CONFIG_HOME")
+            or Path.home() / ".config"
+        )
+        self._default_dir = base_root / "auto_close_studio"
+        self._default_dir.mkdir(parents=True, exist_ok=True)
+        self._pointer_file = self._default_dir / "storage_location.json"
+        self._config_dir = self._load_pointer()
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_pointer(self) -> Path:
+        if self._pointer_file.exists():
+            try:
+                data = json.loads(self._pointer_file.read_text(encoding="utf-8"))
+                stored = data.get("path")
+                if stored:
+                    path = Path(stored).expanduser()
+                    return path
+            except Exception:
+                pass
+        return self._default_dir
+
+    @property
+    def config_dir(self) -> Path:
+        return self._config_dir
+
+    @property
+    def config_file(self) -> Path:
+        return self._config_dir / "settings.json"
+
+    def change_dir(self, new_dir: Path) -> None:
+        target = Path(new_dir).expanduser()
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            resolved = target.resolve()
+        except Exception:
+            resolved = target
+        self._config_dir = resolved
+        payload = {"path": str(self._config_dir)}
+        self._pointer_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+CONFIG_LOCATOR = ConfigLocator()
 
 DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LABEL = {
@@ -194,24 +238,29 @@ def predict_playlist_for_day(cfg: SchedulerConfig, target_day: str) -> Optional[
 
 class ConfigManager(QtCore.QObject):
     config_changed = Signal(SchedulerConfig)
+    storage_dir_changed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self._lock = threading.Lock()
+        self.locator = CONFIG_LOCATOR
         self.config = self._load()
         atexit.register(self._flush_on_exit)
 
     def _load(self) -> SchedulerConfig:
-        if CONFIG_FILE.exists():
+        config_file = self.locator.config_file
+        if config_file.exists():
             try:
-                data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                data = json.loads(config_file.read_text(encoding="utf-8"))
                 return SchedulerConfig.from_dict(data)
             except Exception as exc:  # pragma: no cover - fall back to default
                 print("[설정 읽기 실패]", exc)
         return SchedulerConfig()
 
     def _write(self, config: SchedulerConfig) -> None:
-        CONFIG_FILE.write_text(
+        config_file = self.locator.config_file
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        config_file.write_text(
             json.dumps(config.as_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -229,6 +278,17 @@ class ConfigManager(QtCore.QObject):
             self._write(config)
         self.config_changed.emit(config)
 
+    def change_storage_dir(self, path: Path) -> None:
+        with self._lock:
+            self.locator.change_dir(path)
+            self._write(self.config)
+            config = self.config
+        self.storage_dir_changed.emit(str(self.locator.config_dir))
+        self.config_changed.emit(config)
+
+    def storage_directory(self) -> Path:
+        return self.locator.config_dir
+
     def _flush_on_exit(self) -> None:
         with self._lock:
             try:
@@ -238,7 +298,7 @@ class ConfigManager(QtCore.QObject):
 
 class SchedulerEngine(QtCore.QObject):
     schedule_triggered = Signal(str, str, bool, bool)  # day_key, audio_path, allow_remote, allow_local
-    next_run_changed = Signal(Optional[datetime])
+    next_run_changed = Signal(object)
 
     def __init__(self, cfg_mgr: ConfigManager) -> None:
         super().__init__()
@@ -851,12 +911,21 @@ class SettingsPanel(FancyCard):
         self.delay_spin.setValue(cfg_mgr.config.shutdown_delay)
         self.accent_btn = QtWidgets.QPushButton("테마 색상 변경")
         self.accent_btn.setCursor(Qt.PointingHandCursor)
+        path_row = QtWidgets.QHBoxLayout()
+        self.config_path_label = QtWidgets.QLabel(str(self.cfg_mgr.storage_directory()))
+        self.config_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.config_path_label.setWordWrap(True)
+        path_change_btn = QtWidgets.QPushButton("변경")
+        path_change_btn.setCursor(Qt.PointingHandCursor)
+        path_row.addWidget(self.config_path_label, 1)
+        path_row.addWidget(path_change_btn)
         form.addRow("종료 대상 프로그램", self.target_edit)
         form.addRow("원격 종료", self.remote_toggle)
         form.addRow("본체 종료", self.local_toggle)
         form.addRow("종료 지연(초)", self.delay_spin)
         form.addRow("시작 프로그램 등록", self.startup_toggle)
         form.addRow("테마", self.accent_btn)
+        form.addRow("설정 저장 위치", path_row)
         outer.addLayout(form)
         hosts_group = QtWidgets.QGroupBox("원격 PC 목록")
         hosts_layout = QtWidgets.QVBoxLayout(hosts_group)
@@ -899,6 +968,8 @@ class SettingsPanel(FancyCard):
         self.add_host_btn.clicked.connect(self._add_host)
         self.remove_host_btn.clicked.connect(self._remove_host)
         self.host_table.itemChanged.connect(lambda _: self._persist_hosts())
+        path_change_btn.clicked.connect(self._choose_config_dir)
+        self.cfg_mgr.storage_dir_changed.connect(self._on_storage_dir_changed)
         self._targets_timer = QtCore.QTimer(self)
         self._targets_timer.setSingleShot(True)
         self._targets_timer.setInterval(400)
@@ -948,6 +1019,7 @@ class SettingsPanel(FancyCard):
         self.delay_spin.setValue(cfg.shutdown_delay)
         self.delay_spin.blockSignals(False)
         self._load_hosts()
+        self._update_config_path_label()
 
     def _load_hosts(self) -> None:
         self._loading_hosts = True
@@ -1006,6 +1078,20 @@ class SettingsPanel(FancyCard):
         self._loading_hosts = False
         self._persist_hosts()
 
+    def _choose_config_dir(self) -> None:
+        current = str(self.cfg_mgr.storage_directory())
+        new_path = QtWidgets.QFileDialog.getExistingDirectory(self, "설정 저장 폴더 선택", current)
+        if not new_path:
+            return
+        self.cfg_mgr.change_storage_dir(Path(new_path))
+
+    def _on_storage_dir_changed(self, path: str) -> None:
+        self._update_config_path_label(path)
+
+    def _update_config_path_label(self, path: Optional[str] = None) -> None:
+        target = path or str(self.cfg_mgr.storage_directory())
+        self.config_path_label.setText(target)
+        self.config_path_label.setToolTip(target)
 
 class DateRangeDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
