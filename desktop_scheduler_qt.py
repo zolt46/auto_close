@@ -145,8 +145,10 @@ class SchedulerConfig:
     enable_local_shutdown: bool = True
     shutdown_delay: int = 5
     holidays_enabled: bool = True
+    auto_skip_weekends: bool = False
     holidays: List[str] = field(default_factory=list)
     holiday_ranges: List[Dict[str, str]] = field(default_factory=list)
+    holiday_labels: Dict[str, str] = field(default_factory=dict)
     start_with_os: bool = False
     theme_accent: str = "#2A5CAA"
     shutdown_logs: List[Dict[str, str]] = field(default_factory=list)
@@ -171,8 +173,10 @@ class SchedulerConfig:
             "enable_local_shutdown",
             "shutdown_delay",
             "holidays_enabled",
+            "auto_skip_weekends",
             "holidays",
             "holiday_ranges",
+            "holiday_labels",
             "start_with_os",
             "theme_accent",
             "shutdown_logs",
@@ -185,9 +189,13 @@ class SchedulerConfig:
         for missing in DAY_KEYS:
             days.setdefault(missing, DaySchedule(enabled=(missing not in {"sat", "sun"})))
         base.days = days
+        if not isinstance(base.holiday_labels, dict):
+            base.holiday_labels = {}
         return base
 
 def is_holiday(cfg: SchedulerConfig, target: date) -> bool:
+    if cfg.auto_skip_weekends and target.weekday() >= 5:
+        return True
     if target.isoformat() in cfg.holidays:
         return True
     for rng in cfg.holiday_ranges:
@@ -211,28 +219,62 @@ def is_day_eligible(cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: da
     return True
 
 
-def predict_playlist_for_day(cfg: SchedulerConfig, target_day: str) -> Optional[str]:
-    playlist_len = len(cfg.playlist)
-    if target_day not in DAY_KEYS:
-        return None
-    rotation = cfg.playlist_rotation % max(1, playlist_len)
+@dataclass
+class UpcomingRun:
+    when: datetime
+    day_key: str
+    audio_path: Optional[str]
+    auto_assign: bool
+    remote_allowed: bool
+    local_allowed: bool
+
+
+def compute_upcoming_runs(cfg: SchedulerConfig, horizon_days: int = 28, limit: Optional[int] = None) -> List[UpcomingRun]:
     now = datetime.now()
+    playlist_len = len(cfg.playlist)
+    rotation = cfg.playlist_rotation % max(1, playlist_len) if playlist_len else 0
     index = rotation
-    for offset in range(0, 28):
+    runs: List[UpcomingRun] = []
+    for offset in range(horizon_days):
         current = now + timedelta(days=offset)
         day_key = DAY_KEYS[current.weekday()]
         day_cfg = cfg.days.get(day_key)
         if not day_cfg or not is_day_eligible(cfg, day_cfg, current.date()):
             continue
-        if day_cfg.auto_assign:
-            candidate = cfg.playlist[index % playlist_len] if playlist_len else None
-            if day_key == target_day:
-                return candidate
-            if playlist_len:
-                index = (index + 1) % playlist_len
+        try:
+            hh, mm = map(int, day_cfg.time.split(":"))
+        except Exception:
+            continue
+        scheduled = current.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if scheduled < now:
+            continue
+        if day_cfg.auto_assign and playlist_len:
+            audio = cfg.playlist[index % playlist_len]
         else:
-            if day_key == target_day:
-                return day_cfg.audio_path
+            audio = day_cfg.audio_path if day_cfg.audio_path else (cfg.playlist[index % playlist_len] if day_cfg.auto_assign and playlist_len else None)
+        runs.append(
+            UpcomingRun(
+                when=scheduled,
+                day_key=day_key,
+                audio_path=audio,
+                auto_assign=day_cfg.auto_assign,
+                remote_allowed=cfg.enable_remote_shutdown and day_cfg.allow_remote,
+                local_allowed=cfg.enable_local_shutdown and day_cfg.allow_local_shutdown,
+            )
+        )
+        if day_cfg.auto_assign and playlist_len:
+            index = (index + 1) % playlist_len
+        if limit is not None and len(runs) >= limit:
+            break
+    return runs
+
+
+def predict_playlist_for_day(cfg: SchedulerConfig, target_day: str) -> Optional[str]:
+    if target_day not in DAY_KEYS:
+        return None
+    for run in compute_upcoming_runs(cfg, horizon_days=28):
+        if run.day_key == target_day:
+            return run.audio_path
     return None
 
 
@@ -325,22 +367,9 @@ class SchedulerEngine(QtCore.QObject):
             self._stop.wait(15)
 
     def _compute_next_run(self) -> None:
-        now = datetime.now()
-        best: Optional[datetime] = None
         cfg = self.cfg_mgr.config
-        for offset in range(0, 14):
-            d = now + timedelta(days=offset)
-            day_key = DAY_KEYS[d.weekday()]
-            day_cfg = cfg.days[day_key]
-            if not self._is_day_eligible(cfg, day_cfg, d.date()):
-                continue
-            hh, mm = map(int, day_cfg.time.split(":"))
-            candidate = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if candidate < now:
-                continue
-            if best is None or candidate < best:
-                best = candidate
-        self.next_run_changed.emit(best)
+        runs = compute_upcoming_runs(cfg, horizon_days=28, limit=1)
+        self.next_run_changed.emit(runs[0] if runs else None)
 
     def _is_day_eligible(self, cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: date) -> bool:
         return is_day_eligible(cfg, day_cfg, current_date)
@@ -793,7 +822,75 @@ class PlaylistPanel(FancyCard):
         for callback in list(self._stop_preview_listeners):
             callback()
 
+class AutoAssignmentPreviewCard(FancyCard):
+    def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
+        super().__init__("자동 음성 배정 미리보기", accent, parent)
+        self.cfg_mgr = cfg_mgr
+        self.set_subtitle("향후 실행 순서와 자동 지정 음성을 확인합니다")
+        layout = QtWidgets.QVBoxLayout()
+        layout.setSpacing(8)
+        hint = QtWidgets.QLabel("플레이리스트와 요일 설정을 변경하면 자동으로 갱신됩니다")
+        hint.setProperty("role", "subtitle")
+        layout.addWidget(hint)
+        self.table = QtWidgets.QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels([
+            "날짜",
+            "요일",
+            "시간",
+            "지정 방식",
+            "음성",
+        ])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.Stretch)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.table.setAlternatingRowColors(True)
+        layout.addWidget(self.table)
+        wrapper = QtWidgets.QWidget()
+        wrapper.setLayout(layout)
+        self.body_layout.addWidget(wrapper)
+        self.refresh()
 
+    def refresh(self) -> None:
+        cfg = self.cfg_mgr.config
+        runs = compute_upcoming_runs(cfg, horizon_days=35, limit=14)
+        self.table.clearContents()
+        self.table.clearSpans()
+        if runs:
+            self.table.setRowCount(len(runs))
+            for row, run in enumerate(runs):
+                date_item = QtWidgets.QTableWidgetItem(run.when.strftime("%Y-%m-%d"))
+                day_item = QtWidgets.QTableWidgetItem(DAY_LABEL.get(run.day_key, run.day_key))
+                time_item = QtWidgets.QTableWidgetItem(run.when.strftime("%H:%M"))
+                if run.auto_assign:
+                    mode_text = "자동"
+                    if not run.audio_path:
+                        mode_text += " (대기)"
+                else:
+                    mode_text = "수동"
+                mode_item = QtWidgets.QTableWidgetItem(mode_text)
+                if run.audio_path:
+                    audio_name = Path(run.audio_path).name
+                elif run.auto_assign:
+                    audio_name = "플레이리스트 없음"
+                else:
+                    audio_name = "지정된 파일 없음"
+                audio_item = QtWidgets.QTableWidgetItem(audio_name)
+                if run.audio_path:
+                    audio_item.setToolTip(run.audio_path)
+                for col, item in enumerate([date_item, day_item, time_item, mode_item, audio_item]):
+                    item.setFlags(Qt.ItemIsEnabled)
+                    self.table.setItem(row, col, item)
+        else:
+            self.table.setRowCount(1)
+            empty_item = QtWidgets.QTableWidgetItem("예정된 실행이 없습니다")
+            empty_item.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(0, 0, empty_item)
+            self.table.setSpan(0, 0, 1, 5)
 
 class HolidayPanel(FancyCard):
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
@@ -804,49 +901,79 @@ class HolidayPanel(FancyCard):
         layout.setSpacing(10)
         toggle = QtWidgets.QCheckBox("휴일 기능 사용")
         toggle.setCursor(Qt.PointingHandCursor)
+        weekend_toggle = QtWidgets.QCheckBox("주말(토·일) 자동 제외")
+        weekend_toggle.setCursor(Qt.PointingHandCursor)
         layout.addWidget(toggle)
-        single_row = QtWidgets.QHBoxLayout()
+        layout.addWidget(weekend_toggle)
+        summary = QtWidgets.QLabel()
+        summary.setProperty("role", "subtitle")
+        layout.addWidget(summary)
+        button_row = QtWidgets.QHBoxLayout()
         add_single_btn = QtWidgets.QPushButton("날짜 추가")
-        add_single_btn.setCursor(Qt.PointingHandCursor)
-        single_row.addWidget(add_single_btn)
-        single_row.addStretch(1)
-        layout.addLayout(single_row)
+        add_range_btn = QtWidgets.QPushButton("기간 추가")
+        add_weekend_btn = QtWidgets.QPushButton("주말 일괄 추가")
+        import_btn = QtWidgets.QPushButton("ICS 가져오기")
+        for btn in (add_single_btn, add_range_btn, add_weekend_btn, import_btn):
+            btn.setCursor(Qt.PointingHandCursor)
+            button_row.addWidget(btn)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
         self.single_list = QtWidgets.QListWidget()
         layout.addWidget(self.single_list)
-        range_row = QtWidgets.QHBoxLayout()
-        add_range_btn = QtWidgets.QPushButton("기간 추가")
-        add_range_btn.setCursor(Qt.PointingHandCursor)
-        range_row.addWidget(add_range_btn)
-        range_row.addStretch(1)
-        layout.addLayout(range_row)
         self.range_list = QtWidgets.QListWidget()
         layout.addWidget(self.range_list)
         container = QtWidgets.QWidget()
         container.setLayout(layout)
         self.body_layout.addWidget(container)
         toggle.stateChanged.connect(lambda _: self._persist())
+        weekend_toggle.stateChanged.connect(lambda _: self._persist())
         add_single_btn.clicked.connect(self._add_single)
         add_range_btn.clicked.connect(self._add_range)
+        add_weekend_btn.clicked.connect(self._add_weekend_range)
+        import_btn.clicked.connect(self._import_ics)
         self.single_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.single_list.customContextMenuRequested.connect(lambda pos: self._context_remove(self.single_list, pos))
         self.range_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.range_list.customContextMenuRequested.connect(lambda pos: self._context_remove(self.range_list, pos))
         self.toggle = toggle
+        self.weekend_toggle = weekend_toggle
+        self.summary_label = summary
         self.refresh()
 
     def refresh(self) -> None:
         cfg = self.cfg_mgr.config
         self.toggle.setChecked(cfg.holidays_enabled)
+        self.weekend_toggle.setChecked(cfg.auto_skip_weekends)
+        singles = sorted(cfg.holidays)
         self.single_list.clear()
-        for item in cfg.holidays:
+        for iso in singles:
+            label = cfg.holiday_labels.get(iso, "")
+            text = f"{iso} · {label}" if label else iso
+            item = QtWidgets.QListWidgetItem(text)
+            item.setData(Qt.UserRole, iso)
+            if label:
+                item.setToolTip(label)
             self.single_list.addItem(item)
         self.range_list.clear()
         for rng in cfg.holiday_ranges:
-            self.range_list.addItem(f"{rng['start']} ~ {rng['end']}")
+            text = f"{rng['start']} ~ {rng['end']}"
+            item = QtWidgets.QListWidgetItem(text)
+            item.setData(Qt.UserRole, (rng.get("start"), rng.get("end")))
+            self.range_list.addItem(item)
+        total_days = len(singles)
+        total_ranges = len(cfg.holiday_ranges)
+        weekend_text = "주말 자동 제외" if cfg.auto_skip_weekends else "주말 포함"
+        self.summary_label.setText(f"단일 휴일 {total_days}개 · 기간 {total_ranges}건 · {weekend_text}")
 
     def _persist(self) -> None:
         enabled = self.toggle.isChecked()
-        self.cfg_mgr.update(lambda cfg: setattr(cfg, "holidays_enabled", enabled))
+        skip_weekends = self.weekend_toggle.isChecked()
+
+        def updater(cfg: SchedulerConfig) -> None:
+            cfg.holidays_enabled = enabled
+            cfg.auto_skip_weekends = skip_weekends
+
+        self.cfg_mgr.update(updater)
 
     def _add_single(self) -> None:
         dlg = QtWidgets.QCalendarWidget()
@@ -861,17 +988,124 @@ class HolidayPanel(FancyCard):
         btn.rejected.connect(dialog.reject)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             selected = dlg.selectedDate().toPython().isoformat()
-            self.cfg_mgr.update(lambda cfg: cfg.holidays.append(selected) if selected not in cfg.holidays else None)
+
+            def updater(cfg: SchedulerConfig) -> None:
+                if selected not in cfg.holidays:
+                    cfg.holidays.append(selected)
+
+            self.cfg_mgr.update(updater)
             self.refresh()
 
     def _add_range(self) -> None:
         dialog = DateRangeDialog(self)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             start, end = dialog.result_range
+
             def updater(cfg: SchedulerConfig) -> None:
                 cfg.holiday_ranges.append({"start": start, "end": end})
+
             self.cfg_mgr.update(updater)
             self.refresh()
+
+    def _add_weekend_range(self) -> None:
+        dialog = DateRangeDialog(self)
+        dialog.setWindowTitle("주말 일괄 추가")
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            start_str, end_str = dialog.result_range
+            try:
+                start = datetime.strptime(start_str, "%Y-%m-%d").date()
+                end = datetime.strptime(end_str, "%Y-%m-%d").date()
+            except ValueError:
+                return
+            if end < start:
+                return
+
+            def updater(cfg: SchedulerConfig) -> None:
+                current = start
+                while current <= end:
+                    if current.weekday() >= 5:
+                        iso = current.isoformat()
+                        if iso not in cfg.holidays:
+                            cfg.holidays.append(iso)
+                    current += timedelta(days=1)
+
+            self.cfg_mgr.update(updater)
+            self.refresh()
+
+    def _import_ics(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "iCalendar 가져오기", str(Path.home()), "iCalendar (*.ics)")
+        if not path:
+            return
+        try:
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = Path(path).read_text(encoding="cp949")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "읽기 실패", f"파일을 읽을 수 없습니다:\n{exc}")
+            return
+        unfolded: List[str] = []
+        for line in text.splitlines():
+            if line.startswith(" ") or line.startswith("\t"):
+                if unfolded:
+                    unfolded[-1] += line.strip()
+            else:
+                unfolded.append(line.strip())
+        events: List[Tuple[str, str]] = []
+        current_summary = ""
+        current_date = ""
+        inside = False
+        for line in unfolded:
+            if line == "BEGIN:VEVENT":
+                inside = True
+                current_summary = ""
+                current_date = ""
+                continue
+            if line == "END:VEVENT":
+                if inside and current_date:
+                    events.append((current_date, current_summary))
+                inside = False
+                continue
+            if not inside:
+                continue
+            if line.startswith("SUMMARY"):
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    current_summary = parts[1].strip()
+            elif line.startswith("DTSTART"):
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    value = parts[1].strip()
+                    digits = value[:8]
+                    try:
+                        iso = datetime.strptime(digits, "%Y%m%d").date().isoformat()
+                        current_date = iso
+                    except ValueError:
+                        continue
+        if not events:
+            QtWidgets.QMessageBox.information(self, "안내", "추출된 휴일 정보가 없습니다.")
+            return
+        added = 0
+        labeled = 0
+
+        def updater(cfg: SchedulerConfig) -> None:
+            nonlocal added, labeled
+            for iso, summary in events:
+                if iso not in cfg.holidays:
+                    cfg.holidays.append(iso)
+                    added += 1
+                if summary:
+                    if cfg.holiday_labels.get(iso) != summary:
+                        cfg.holiday_labels[iso] = summary
+                        labeled += 1
+
+        self.cfg_mgr.update(updater)
+        self.refresh()
+        QtWidgets.QMessageBox.information(
+            self,
+            "가져오기 완료",
+            f"총 {len(events)}건 중 새로 추가 {added}건, 라벨 갱신 {labeled}건",
+        )
 
     def _context_remove(self, widget: QtWidgets.QListWidget, pos: QtCore.QPoint) -> None:
         item = widget.itemAt(pos)
@@ -880,12 +1114,25 @@ class HolidayPanel(FancyCard):
         menu = QtWidgets.QMenu(widget)
         act = menu.addAction("삭제")
         if menu.exec(widget.mapToGlobal(pos)) == act:
-            text = item.text()
+            key = item.data(Qt.UserRole)
+
             def updater(cfg: SchedulerConfig) -> None:
                 if widget is self.single_list:
-                    cfg.holidays = [d for d in cfg.holidays if d != text]
+                    iso = key or item.text()
+                    cfg.holidays = [d for d in cfg.holidays if d != iso]
+                    cfg.holiday_labels.pop(iso, None)
                 else:
-                    cfg.holiday_ranges = [rng for rng in cfg.holiday_ranges if f"{rng['start']} ~ {rng['end']}" != text]
+                    if isinstance(key, tuple):
+                        start, end = key
+                    else:
+                        parts = item.text().split(" ~ ")
+                        start, end = parts if len(parts) == 2 else (None, None)
+                    cfg.holiday_ranges = [
+                        rng
+                        for rng in cfg.holiday_ranges
+                        if not (start and end and rng.get("start") == start and rng.get("end") == end)
+                    ]
+
             self.cfg_mgr.update(updater)
             self.refresh()
 
@@ -1124,8 +1371,8 @@ class DashboardCard(FancyCard):
     request_force_run = Signal()
 
     def __init__(self, accent: str, parent=None) -> None:
-        super().__init__("다음 실행", accent, parent)
-        self.set_subtitle("예약된 스케줄 정보를 확인합니다")
+        super().__init__("다음 실행 내역", accent, parent)
+        self.set_subtitle("예약된 스케줄과 재생 정보를 함께 확인합니다")
         self.timer_label = QtWidgets.QLabel("다음 일정 계산 중…")
         self.timer_label.setProperty("role", "title")
         self.timer_label.setAlignment(Qt.AlignCenter)
@@ -1134,22 +1381,49 @@ class DashboardCard(FancyCard):
         self.detail_label.setAlignment(Qt.AlignCenter)
         self.detail_label.setProperty("role", "subtitle")
         self.body_layout.addWidget(self.detail_label)
+        self.audio_label = QtWidgets.QLabel("음성: -")
+        self.audio_label.setAlignment(Qt.AlignCenter)
+        self.audio_label.setProperty("role", "subtitle")
+        self.body_layout.addWidget(self.audio_label)
+        self.config_label = QtWidgets.QLabel("원격 종료: - · 본체 종료: -")
+        self.config_label.setAlignment(Qt.AlignCenter)
+        self.config_label.setProperty("role", "subtitle")
+        self.body_layout.addWidget(self.config_label)
         action = QtWidgets.QPushButton("지금 즉시 실행")
         action.setCursor(Qt.PointingHandCursor)
         action.clicked.connect(self.request_force_run.emit)
         self.body_layout.addWidget(action)
 
-    def update_next_run(self, when: Optional[datetime]) -> None:
-        if when is None:
+    def update_next_run(self, run: Optional[UpcomingRun]) -> None:
+        if run is None:
             self.timer_label.setText("예정된 실행이 없습니다")
-            self.detail_label.setText("활성화된 요일을 확인하세요")
+            self.detail_label.setText("활성화된 요일과 휴일 설정을 확인하세요")
+            self.audio_label.setText("음성: -")
+            self.audio_label.setToolTip("")
+            self.config_label.setText("원격 종료: - · 본체 종료: -")
             return
+        when = run.when
         now = datetime.now()
         diff = when - now
         hours, remainder = divmod(int(diff.total_seconds()), 3600)
         minutes, _ = divmod(remainder, 60)
+        day_label = DAY_LABEL.get(run.day_key, "")
         self.timer_label.setText(f"{when:%Y-%m-%d %H:%M}")
-        self.detail_label.setText(f"{hours}시간 {minutes}분 후 실행")
+        self.detail_label.setText(f"{day_label} · {hours}시간 {minutes}분 후 실행")
+        if run.audio_path:
+            name = Path(run.audio_path).name
+            mode = "자동" if run.auto_assign else "수동"
+            self.audio_label.setText(f"음성: {name} ({mode})")
+            self.audio_label.setToolTip(run.audio_path)
+        else:
+            if run.auto_assign:
+                self.audio_label.setText("음성: 자동 지정 대기 (플레이리스트 비어 있음)")
+            else:
+                self.audio_label.setText("음성: 지정된 파일 없음")
+            self.audio_label.setToolTip("")
+        remote_state = "허용" if run.remote_allowed else "미사용"
+        local_state = "허용" if run.local_allowed else "미사용"
+        self.config_label.setText(f"원격 종료: {remote_state} · 본체 종료: {local_state}")
 
 class TodaySummaryCard(FancyCard):
     def __init__(self, accent: str, parent=None) -> None:
@@ -1207,13 +1481,21 @@ class TodaySummaryCard(FancyCard):
         self.remote_value.setText(remote_state)
         self.local_value.setText(local_state)
 
-    def update_next_run(self, when: Optional[datetime]) -> None:
-        if when is None:
+    def update_next_run(self, run: Optional[UpcomingRun]) -> None:
+        if run is None:
             return
         today = datetime.now().date()
+        when = run.when
         if when.date() != today:
             return
         self.status_value.setText(f"오늘 {when:%H:%M}에 실행 예정")
+        if run.audio_path:
+            name = Path(run.audio_path).name
+            self.audio_value.setText(name)
+            self.audio_value.setToolTip(run.audio_path)
+        elif run.auto_assign:
+            self.audio_value.setText("자동 지정 대기")
+            self.audio_value.setToolTip("")
 
 
 class ShutdownLogCard(FancyCard):
@@ -1467,8 +1749,8 @@ class MainWindow(QtWidgets.QMainWindow):
         home_layout = QtWidgets.QVBoxLayout(home_container)
         home_layout.setContentsMargins(24, 20, 24, 24)
         home_layout.setSpacing(16)
-        home_layout.addWidget(self.dashboard)
         home_layout.addWidget(self.today_card)
+        home_layout.addWidget(self.dashboard)
         home_layout.addWidget(self.log_card)
         home_layout.addStretch(1)
         home_page = self._wrap_scroll(home_container)
@@ -1494,11 +1776,13 @@ class MainWindow(QtWidgets.QMainWindow):
         day_page = self._wrap_scroll(day_wrapper)
 
         self.playlist_panel = PlaylistPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
+        self.assignment_preview = AutoAssignmentPreviewCard(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
         playlist_wrapper = QtWidgets.QWidget()
         playlist_layout = QtWidgets.QVBoxLayout(playlist_wrapper)
         playlist_layout.setContentsMargins(24, 20, 24, 24)
         playlist_layout.setSpacing(16)
         playlist_layout.addWidget(self.playlist_panel)
+        playlist_layout.addWidget(self.assignment_preview)
         playlist_layout.addStretch(1)
         playlist_page = self._wrap_scroll(playlist_wrapper)
 
@@ -1550,6 +1834,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log_card,
                 *self.day_cards.values(),
                 self.playlist_panel,
+                self.assignment_preview,
                 self.holiday_panel,
                 self.settings_panel,
             ]
@@ -1590,9 +1875,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return predict_playlist_for_day(cfg, today_key)
 
-    def _on_next_run_changed(self, when: Optional[datetime]) -> None:
-        self.dashboard.update_next_run(when)
-        self.today_card.update_next_run(when)
+    def _on_next_run_changed(self, run: Optional[UpcomingRun]) -> None:
+        self.dashboard.update_next_run(run)
+        self.today_card.update_next_run(run)
 
     def _update_today_summary(self) -> None:
         self.today_card.update_from_config(self.cfg_mgr.config, self._preview_audio_for_today())
@@ -1657,12 +1942,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_config_changed(self, cfg: SchedulerConfig) -> None:
         self._apply_theme(cfg.theme_accent)
         self.playlist_panel.refresh()
+        self.assignment_preview.refresh()
         self.holiday_panel.refresh()
         self.settings_panel.sync_from_config()
         for card in self.day_cards.values():
             card.sync_from_config()
         self._update_today_summary()
         self.log_card.update_logs(cfg.shutdown_logs)
+        self.scheduler._compute_next_run()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - Qt callback
         event.ignore()
