@@ -1851,7 +1851,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid {accent_disabled_border};
                 color: rgba(255, 255, 255, 0.75);
             }}
+            QPushButton#HelpButton {{
+                background-color: #FF7043;
+                border: 1px solid #E64A19;
+            }}
+            QPushButton#HelpButton:hover {{
+                background-color: #FF8A65;
+                border: 1px solid #F4511E;
+            }}
             QCheckBox, QLabel {{ color: {text_hex}; }}
+            QLabel#PageTitle {{
+                font-weight: 700;
+                font-size: 20px;
+                color: {text_hex};
+            }}
+            QLabel#PageTitle:hover {{
+                color: {accent_hex};
+                text-decoration: underline;
+            }}
             QListWidget {{
                 background: #FFFFFF;
                 color: {text_hex};
@@ -1950,10 +1967,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menu_button.setCursor(Qt.PointingHandCursor)
         top_layout.addWidget(self.menu_button, 0)
         self.page_title = QtWidgets.QLabel("홈")
+        self.page_title.setObjectName("PageTitle")
         self.page_title.setProperty("role", "title")
+        self.page_title.setCursor(Qt.PointingHandCursor)
+        self.page_title.setToolTip("상단 제목(현재 페이지 이름)을 5회 연속 클릭하면 관리자 모드로 전환할 수 있습니다.")
         top_layout.addWidget(self.page_title, 0)
         top_layout.addStretch(1)
         self.help_button = QtWidgets.QPushButton("도움말")
+        self.help_button.setObjectName("HelpButton")
         self.help_button.setCursor(Qt.PointingHandCursor)
         self.help_button.setToolTip("일반 기능 사용법")
         top_layout.addWidget(self.help_button, 0)
@@ -2285,7 +2306,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _force_execute(self) -> None:
         now_key = DAY_KEYS[datetime.now().weekday()]
-        self._on_schedule_triggered(now_key, self.scheduler._resolve_audio(self.cfg_mgr.config, self.cfg_mgr.config.days[now_key]) or "", True, True)
+        cfg = self.cfg_mgr.config
+        day_cfg = cfg.days[now_key]
+        audio = self.scheduler._resolve_audio(cfg, day_cfg) or ""
+        allow_remote = cfg.enable_remote_shutdown and day_cfg.allow_remote
+        allow_local = cfg.enable_local_shutdown and day_cfg.allow_local_shutdown
+        self._on_schedule_triggered(now_key, audio, allow_remote, allow_local)
 
     def _on_preview_requested(self, path: str) -> None:
         if self._playback_mode == "schedule":
@@ -2321,6 +2347,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._playback_mode == "schedule":
             allow_remote, allow_local = self._pending_follow_up or (False, False)
+            cfg_snapshot = self.cfg_mgr.config
+            if self._active_day_key:
+                day_cfg = cfg_snapshot.days.get(self._active_day_key)
+            else:
+                day_cfg = None
+            if day_cfg is not None:
+                allow_remote = allow_remote and cfg_snapshot.enable_remote_shutdown and day_cfg.allow_remote
+                allow_local = allow_local and cfg_snapshot.enable_local_shutdown and day_cfg.allow_local_shutdown
+            else:
+                allow_remote = allow_remote and cfg_snapshot.enable_remote_shutdown
+                allow_local = allow_local and cfg_snapshot.enable_local_shutdown
             self._pending_follow_up = None
             self.overlay.hide()
             if allow_remote:
@@ -2416,7 +2453,7 @@ class App(QtWidgets.QApplication):
     def _show_help(self, mode: str) -> None:
         if mode == "admin":
             lines = [
-                "관리자 모드는 상단 제목을 5회 연속 클릭하면 로그인 창이 나타납니다.",
+                "관리자 모드는 상단 제목(상단 바의 현재 페이지 이름)을 5회 연속 클릭하면 로그인 창이 나타납니다.",
                 "로그인 후 '휴일'과 '고급 설정' 페이지가 열리며, 원격 종료·설정 파일 위치 등을 관리할 수 있습니다.",
                 "휴일 목록에서는 날짜나 기간을 추가하고 선택한 항목을 삭제할 수 있으며, 우클릭으로도 삭제할 수 있습니다.",
                 "고급 설정에서 일반/관리자 비밀번호를 변경하고 원격 PC 목록, 테마, 시작 프로그램 등록을 조정하세요.",
