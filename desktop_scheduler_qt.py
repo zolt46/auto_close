@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import sys
@@ -44,7 +45,21 @@ from PySide6.QtGui import QIcon, QPalette, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
+DEFAULT_USER_PASSWORD = "0000"
+DEFAULT_ADMIN_PASSWORD = "000000"
 
+
+def hash_password(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def verify_password(stored_hash: str, attempt: str) -> bool:
+    if not stored_hash:
+        return True
+    try:
+        return stored_hash == hash_password(attempt)
+    except Exception:
+        return False
 
 class ConfigLocator:
     """현재 설정 파일 위치를 추적하고 변경을 돕는 도우미."""
@@ -152,6 +167,8 @@ class SchedulerConfig:
     start_with_os: bool = False
     theme_accent: str = "#2A5CAA"
     shutdown_logs: List[Dict[str, str]] = field(default_factory=list)
+    user_password_hash: str = field(default_factory=lambda: hash_password(DEFAULT_USER_PASSWORD))
+    admin_password_hash: str = field(default_factory=lambda: hash_password(DEFAULT_ADMIN_PASSWORD))
     days: Dict[str, DaySchedule] = field(
         default_factory=lambda: {key: DaySchedule(enabled=(key not in {"sat", "sun"})) for key in DAY_KEYS}
     )
@@ -180,6 +197,8 @@ class SchedulerConfig:
             "start_with_os",
             "theme_accent",
             "shutdown_logs",
+            "user_password_hash",
+            "admin_password_hash",
         ):
             if key in data:
                 setattr(base, key, data[key])
@@ -191,6 +210,10 @@ class SchedulerConfig:
         base.days = days
         if not isinstance(base.holiday_labels, dict):
             base.holiday_labels = {}
+        if not isinstance(base.user_password_hash, str) or not base.user_password_hash:
+            base.user_password_hash = hash_password(DEFAULT_USER_PASSWORD)
+        if not isinstance(base.admin_password_hash, str) or not base.admin_password_hash:
+            base.admin_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
         return base
 
 def is_holiday(cfg: SchedulerConfig, target: date) -> bool:
@@ -919,9 +942,23 @@ class HolidayPanel(FancyCard):
         button_row.addStretch(1)
         layout.addLayout(button_row)
         self.single_list = QtWidgets.QListWidget()
+        self.single_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.single_list)
+        single_btns = QtWidgets.QHBoxLayout()
+        self.single_delete_btn = QtWidgets.QPushButton("선택 삭제")
+        self.single_delete_btn.setCursor(Qt.PointingHandCursor)
+        single_btns.addWidget(self.single_delete_btn)
+        single_btns.addStretch(1)
+        layout.addLayout(single_btns)
         self.range_list = QtWidgets.QListWidget()
+        self.range_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.range_list)
+        range_btns = QtWidgets.QHBoxLayout()
+        self.range_delete_btn = QtWidgets.QPushButton("선택 삭제")
+        self.range_delete_btn.setCursor(Qt.PointingHandCursor)
+        range_btns.addWidget(self.range_delete_btn)
+        range_btns.addStretch(1)
+        layout.addLayout(range_btns)
         container = QtWidgets.QWidget()
         container.setLayout(layout)
         self.body_layout.addWidget(container)
@@ -935,6 +972,8 @@ class HolidayPanel(FancyCard):
         self.single_list.customContextMenuRequested.connect(lambda pos: self._context_remove(self.single_list, pos))
         self.range_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.range_list.customContextMenuRequested.connect(lambda pos: self._context_remove(self.range_list, pos))
+        self.single_delete_btn.clicked.connect(lambda: self._remove_selected(self.single_list))
+        self.range_delete_btn.clicked.connect(lambda: self._remove_selected(self.range_list))
         self.toggle = toggle
         self.weekend_toggle = weekend_toggle
         self.summary_label = summary
@@ -1136,6 +1175,34 @@ class HolidayPanel(FancyCard):
             self.cfg_mgr.update(updater)
             self.refresh()
 
+    def _remove_selected(self, widget: QtWidgets.QListWidget) -> None:
+        items = widget.selectedItems()
+        if not items:
+            QtWidgets.QMessageBox.information(self, "안내", "삭제할 항목을 선택하세요.")
+            return
+        for item in items:
+            key = item.data(Qt.UserRole)
+
+            def updater(cfg: SchedulerConfig, item=item, key=key) -> None:
+                if widget is self.single_list:
+                    iso = key or item.text()
+                    cfg.holidays = [d for d in cfg.holidays if d != iso]
+                    cfg.holiday_labels.pop(iso, None)
+                else:
+                    if isinstance(key, tuple):
+                        start, end = key
+                    else:
+                        parts = item.text().split(" ~ ")
+                        start, end = parts if len(parts) == 2 else (None, None)
+                    cfg.holiday_ranges = [
+                        rng
+                        for rng in cfg.holiday_ranges
+                        if not (start and end and rng.get("start") == start and rng.get("end") == end)
+                    ]
+
+            self.cfg_mgr.update(updater)
+        self.refresh()
+
 
 class SettingsPanel(FancyCard):
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
@@ -1166,6 +1233,14 @@ class SettingsPanel(FancyCard):
         path_change_btn.setCursor(Qt.PointingHandCursor)
         path_row.addWidget(self.config_path_label, 1)
         path_row.addWidget(path_change_btn)
+        password_row = QtWidgets.QHBoxLayout()
+        self.user_password_btn = QtWidgets.QPushButton("일반 비밀번호 변경")
+        self.admin_password_btn = QtWidgets.QPushButton("관리자 비밀번호 변경")
+        for btn in (self.user_password_btn, self.admin_password_btn):
+            btn.setCursor(Qt.PointingHandCursor)
+        password_row.addWidget(self.user_password_btn)
+        password_row.addWidget(self.admin_password_btn)
+        password_row.addStretch(1)
         form.addRow("종료 대상 프로그램", self.target_edit)
         form.addRow("원격 종료", self.remote_toggle)
         form.addRow("본체 종료", self.local_toggle)
@@ -1173,6 +1248,7 @@ class SettingsPanel(FancyCard):
         form.addRow("시작 프로그램 등록", self.startup_toggle)
         form.addRow("테마", self.accent_btn)
         form.addRow("설정 저장 위치", path_row)
+        form.addRow("비밀번호 관리", password_row)
         outer.addLayout(form)
         hosts_group = QtWidgets.QGroupBox("원격 PC 목록")
         hosts_layout = QtWidgets.QVBoxLayout(hosts_group)
@@ -1217,6 +1293,8 @@ class SettingsPanel(FancyCard):
         self.host_table.itemChanged.connect(lambda _: self._persist_hosts())
         path_change_btn.clicked.connect(self._choose_config_dir)
         self.cfg_mgr.storage_dir_changed.connect(self._on_storage_dir_changed)
+        self.user_password_btn.clicked.connect(self._change_user_password)
+        self.admin_password_btn.clicked.connect(self._change_admin_password)
         self._targets_timer = QtCore.QTimer(self)
         self._targets_timer.setSingleShot(True)
         self._targets_timer.setInterval(400)
@@ -1340,6 +1418,31 @@ class SettingsPanel(FancyCard):
         self.config_path_label.setText(target)
         self.config_path_label.setToolTip(target)
 
+    def _change_user_password(self) -> None:
+        dialog = PasswordChangeDialog("일반 사용자 비밀번호 변경", require_current=False, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        def updater(cfg: SchedulerConfig) -> None:
+            cfg.user_password_hash = hash_password(dialog.new_password)
+
+        self.cfg_mgr.update(updater)
+        QtWidgets.QMessageBox.information(self, "완료", "일반 사용자 비밀번호가 변경되었습니다.")
+
+    def _change_admin_password(self) -> None:
+        dialog = PasswordChangeDialog("관리자 비밀번호 변경", require_current=True, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        if not verify_password(self.cfg_mgr.config.admin_password_hash, dialog.current_password):
+            QtWidgets.QMessageBox.warning(self, "오류", "현재 관리자 비밀번호가 일치하지 않습니다.")
+            return
+
+        def updater(cfg: SchedulerConfig) -> None:
+            cfg.admin_password_hash = hash_password(dialog.new_password)
+
+        self.cfg_mgr.update(updater)
+        QtWidgets.QMessageBox.information(self, "완료", "관리자 비밀번호가 변경되었습니다.")
+
 class DateRangeDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1365,6 +1468,112 @@ class DateRangeDialog(QtWidgets.QDialog):
             return
         self.result_range = (start.isoformat(), end.isoformat())
         super().accept()
+
+class PasswordChangeDialog(QtWidgets.QDialog):
+    def __init__(self, title: str, require_current: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        form = QtWidgets.QFormLayout(self)
+        form.setSpacing(12)
+        self._require_current = require_current
+        self.current_edit: Optional[QtWidgets.QLineEdit] = None
+        if require_current:
+            current = QtWidgets.QLineEdit()
+            current.setEchoMode(QtWidgets.QLineEdit.Password)
+            current.setPlaceholderText("현재 비밀번호")
+            form.addRow("현재 비밀번호", current)
+            self.current_edit = current
+        self.new_edit = QtWidgets.QLineEdit()
+        self.new_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.new_edit.setPlaceholderText("새 비밀번호")
+        form.addRow("새 비밀번호", self.new_edit)
+        self.confirm_edit = QtWidgets.QLineEdit()
+        self.confirm_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.confirm_edit.setPlaceholderText("새 비밀번호 확인")
+        form.addRow("비밀번호 확인", self.confirm_edit)
+        self.error_label = QtWidgets.QLabel()
+        self.error_label.setStyleSheet("color: #C62828;")
+        form.addRow("", self.error_label)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._try_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.new_password: str = ""
+        self.current_password: str = ""
+
+    def _try_accept(self) -> None:
+        new_value = self.new_edit.text().strip()
+        confirm = self.confirm_edit.text().strip()
+        if not new_value:
+            self.error_label.setText("새 비밀번호를 입력하세요.")
+            self.new_edit.setFocus()
+            return
+        if len(new_value) < 4:
+            self.error_label.setText("비밀번호는 최소 4자 이상이어야 합니다.")
+            self.new_edit.setFocus()
+            return
+        if new_value != confirm:
+            self.error_label.setText("비밀번호 확인이 일치하지 않습니다.")
+            self.confirm_edit.setFocus()
+            return
+        if self._require_current and self.current_edit is not None:
+            current = self.current_edit.text().strip()
+            if not current:
+                self.error_label.setText("현재 비밀번호를 입력하세요.")
+                self.current_edit.setFocus()
+                return
+            self.current_password = current
+        self.new_password = new_value
+        self.accept()
+
+
+class PasswordPrompt(QtWidgets.QDialog):
+    def __init__(self, title: str, prompt: str, validator: Callable[[str], bool], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.validator = validator
+        layout = QtWidgets.QVBoxLayout(self)
+        message = QtWidgets.QLabel(prompt)
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        self.password_edit = QtWidgets.QLineEdit()
+        self.password_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.password_edit.returnPressed.connect(self._attempt_login)
+        layout.addWidget(self.password_edit)
+        self.error_label = QtWidgets.QLabel()
+        self.error_label.setStyleSheet("color: #C62828;")
+        layout.addWidget(self.error_label)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._attempt_login)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.password_edit.setFocus()
+
+    def _attempt_login(self) -> None:
+        value = self.password_edit.text().strip()
+        if self.validator(value):
+            self.accept()
+        else:
+            self.error_label.setText("비밀번호가 일치하지 않습니다.")
+            self.password_edit.selectAll()
+            self.password_edit.setFocus()
+
+
+class HelpDialog(QtWidgets.QDialog):
+    def __init__(self, title: str, lines: List[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        layout = QtWidgets.QVBoxLayout(self)
+        label = QtWidgets.QLabel("\n".join(lines))
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close_btn.rejected.connect(self.reject)
+        close_btn.accepted.connect(self.accept)
+        layout.addWidget(close_btn)
 
 
 class DashboardCard(FancyCard):
@@ -1569,6 +1778,11 @@ def create_tray_icon(accent_color: str) -> QIcon:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    show_login_requested = Signal()
+    logout_requested = Signal()
+    admin_login_requested = Signal()
+    help_requested = Signal(str)
+
     def __init__(self, cfg_mgr: ConfigManager) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -1582,7 +1796,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_day_key: Optional[str] = None
         self._cards: List[FancyCard] = []
         self._ignore_playback_finished = False
+        self._mode: str = "user"
+        self._locked: bool = True
+        self._secret_clicks: int = 0
+        self._last_secret_time: float = 0.0
+        self.tray: Optional[QtWidgets.QSystemTrayIcon] = None
         self._build_palette()
+        self.setWindowIcon(create_tray_icon(self.cfg_mgr.config.theme_accent))
         self._build_ui()
         self._connect_signals()
         self.scheduler.start()
@@ -1733,6 +1953,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.page_title.setProperty("role", "title")
         top_layout.addWidget(self.page_title, 0)
         top_layout.addStretch(1)
+        self.help_button = QtWidgets.QPushButton("도움말")
+        self.help_button.setCursor(Qt.PointingHandCursor)
+        self.help_button.setToolTip("일반 기능 사용법")
+        top_layout.addWidget(self.help_button, 0)
+        self.admin_exit_button = QtWidgets.QPushButton("관리자 모드 종료")
+        self.admin_exit_button.setCursor(Qt.PointingHandCursor)
+        self.admin_exit_button.setVisible(False)
+        top_layout.addWidget(self.admin_exit_button, 0)
+        self.lock_button = QtWidgets.QPushButton("잠금")
+        self.lock_button.setCursor(Qt.PointingHandCursor)
+        self.lock_button.setToolTip("창을 숨기고 다시 열 때 비밀번호를 요구합니다.")
+        top_layout.addWidget(self.lock_button, 0)
         content_layout.addWidget(top_bar, 0)
         self.content_stack = QtWidgets.QStackedWidget()
         content_layout.addWidget(self.content_stack, 1)
@@ -1827,6 +2059,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.drawer.hide()
         self.menu_button.clicked.connect(self._toggle_drawer)
         self.log_card.clear_requested.connect(self._clear_logs)
+        self.help_button.clicked.connect(self._on_help_clicked)
+        self.lock_button.clicked.connect(self._request_lock)
+        self.admin_exit_button.clicked.connect(lambda: self.set_mode("user"))
         self._cards.extend(
             [
                 self.dashboard,
@@ -1843,6 +2078,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.today_card.update_from_config(self.cfg_mgr.config, self._preview_audio_for_today())
         self.log_card.update_logs(self.cfg_mgr.config.shutdown_logs)
         self._create_tray()
+        self.page_title.installEventFilter(self)
+        self.set_mode("user")
 
     def _wrap_scroll(self, content: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
         scroll = QtWidgets.QScrollArea()
@@ -1854,6 +2091,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _toggle_drawer(self) -> None:
         self.drawer.setVisible(not self.drawer.isVisible())
+
+    def set_locked(self, locked: bool) -> None:
+        self._locked = locked
+        if locked:
+            self.set_mode("user")
+            self.overlay.hide()
+            self.hide()
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in {"user", "admin"}:
+            return
+        self._mode = mode
+        is_admin = mode == "admin"
+        self.log_card.setVisible(is_admin)
+        for key in ("휴일", "고급 설정"):
+            btn = self._nav_buttons.get(key)
+            if btn:
+                btn.setVisible(is_admin)
+        if not is_admin and self.page_title.text() in {"휴일", "고급 설정"}:
+            self._set_active_page("홈")
+        self.admin_exit_button.setVisible(is_admin)
+        self.help_button.setToolTip("일반 기능 사용법" if not is_admin else "고급 기능 사용법")
+
+    def _request_lock(self) -> None:
+        self.logout_requested.emit()
+
+    def _on_help_clicked(self) -> None:
+        self.help_requested.emit(self._mode)
 
     def _set_active_page(self, name: str) -> None:
         index = self._page_indices.get(name)
@@ -1906,11 +2174,12 @@ class MainWindow(QtWidgets.QMainWindow):
         run_action = menu.addAction("지금 실행")
         menu.addSeparator()
         exit_action = menu.addAction("완전히 종료")
-        show_action.triggered.connect(self.showNormal)
+        show_action.triggered.connect(self._handle_tray_show)
         run_action.triggered.connect(self._force_execute)
         exit_action.triggered.connect(self._exit_all)
         self.tray.setContextMenu(menu)
         self.tray.setToolTip(APP_NAME)
+        self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
     def _connect_signals(self) -> None:
@@ -1935,7 +2204,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_theme(self, accent: str) -> None:
         self._build_palette()
-        self.tray.setIcon(create_tray_icon(accent))
+        icon = create_tray_icon(accent)
+        self.setWindowIcon(icon)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
+        if self.tray:
+            self.tray.setIcon(icon)
         for card in self._cards:
             card.set_accent(accent)
 
@@ -1951,10 +2226,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_card.update_logs(cfg.shutdown_logs)
         self.scheduler._compute_next_run()
 
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if obj is self.page_title and event.type() == QtCore.QEvent.MouseButtonPress:
+            if self._locked or self._mode == "admin":
+                return super().eventFilter(obj, event)
+            if isinstance(event, QtGui.QMouseEvent) and event.button() == Qt.LeftButton:
+                now = time.time()
+                if now - self._last_secret_time > 2:
+                    self._secret_clicks = 0
+                self._secret_clicks += 1
+                self._last_secret_time = now
+                if self._secret_clicks >= 5:
+                    self._secret_clicks = 0
+                    self.admin_login_requested.emit()
+        return super().eventFilter(obj, event)
+
+    def _handle_tray_show(self) -> None:
+        if self._locked:
+            self.show_login_requested.emit()
+        else:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+    def _on_tray_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
+            self._handle_tray_show()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - Qt callback
         event.ignore()
-        self.hide()
-        self.tray.showMessage(APP_NAME, "프로그램은 계속 백그라운드에서 실행됩니다.")
+        if self._locked:
+            self.hide()
+            if self.tray:
+                self.tray.showMessage(APP_NAME, "프로그램은 계속 백그라운드에서 실행됩니다.")
+        else:
+            self.logout_requested.emit()
 
     def _on_schedule_triggered(self, day_key: str, audio_path: str, allow_remote: bool, allow_local: bool) -> None:
         if self.audio_service.player.playbackState() != QMediaPlayer.StoppedState:
@@ -2050,8 +2356,84 @@ class App(QtWidgets.QApplication):
         super().__init__(argv)
         self.setQuitOnLastWindowClosed(False)
         self.cfg_mgr = ConfigManager()
+        icon = create_tray_icon(self.cfg_mgr.config.theme_accent)
+        self.setWindowIcon(icon)
         self.window = MainWindow(self.cfg_mgr)
-        self.window.show()
+        self.window.set_locked(True)
+        self.window.show_login_requested.connect(lambda: self._show_user_login(initial=False))
+        self.window.logout_requested.connect(self._lock_from_user)
+        self.window.admin_login_requested.connect(self._show_admin_login)
+        self.window.help_requested.connect(self._show_help)
+        self._show_user_login(initial=True)
+
+    def _show_user_login(self, *, initial: bool) -> None:
+        if not self.window.is_locked():
+            return
+        prompt = PasswordPrompt(
+            "일반 사용자 로그인",
+            "일반 사용자 비밀번호를 입력하세요.",
+            lambda pw: verify_password(self.cfg_mgr.config.user_password_hash, pw),
+            parent=self.window,
+        )
+        result = prompt.exec()
+        if result == QtWidgets.QDialog.Accepted:
+            self.window.set_locked(False)
+            self.window.set_mode("user")
+            self.window.showNormal()
+            self.window.raise_()
+            self.window.activateWindow()
+        elif initial:
+            QtWidgets.QApplication.quit()
+
+    def _lock_from_user(self) -> None:
+        if not self.window.is_locked():
+            self.window.set_locked(True)
+            if self.window.tray:
+                self.window.tray.showMessage(
+                    APP_NAME,
+                    "화면이 잠겼습니다. 트레이에서 다시 열면 비밀번호를 입력할 수 있습니다.",
+                    QtWidgets.QSystemTrayIcon.Information,
+                    3000,
+                )
+
+    def _show_admin_login(self) -> None:
+        if self.window.is_locked() or self.window._mode == "admin":
+            return
+        prompt = PasswordPrompt(
+            "관리자 로그인",
+            "관리자 비밀번호를 입력하세요.",
+            lambda pw: verify_password(self.cfg_mgr.config.admin_password_hash, pw),
+            parent=self.window,
+        )
+        if prompt.exec() == QtWidgets.QDialog.Accepted:
+            self.window.set_mode("admin")
+            QtWidgets.QMessageBox.information(
+                self.window,
+                "관리자 모드",
+                "고급 기능이 활성화되었습니다. '관리자 모드 종료' 버튼으로 일반 모드로 돌아갈 수 있습니다.",
+            )
+
+    def _show_help(self, mode: str) -> None:
+        if mode == "admin":
+            lines = [
+                "관리자 모드는 상단 제목을 5회 연속 클릭하면 로그인 창이 나타납니다.",
+                "로그인 후 '휴일'과 '고급 설정' 페이지가 열리며, 원격 종료·설정 파일 위치 등을 관리할 수 있습니다.",
+                "휴일 목록에서는 날짜나 기간을 추가하고 선택한 항목을 삭제할 수 있으며, 우클릭으로도 삭제할 수 있습니다.",
+                "고급 설정에서 일반/관리자 비밀번호를 변경하고 원격 PC 목록, 테마, 시작 프로그램 등록을 조정하세요.",
+                "관리자 모드 종료 버튼을 누르면 일반 모드로 돌아갑니다. 잠금 버튼은 창을 숨기고 다시 로그인하도록 합니다.",
+            ]
+            title = "고급 기능 도움말"
+        else:
+            lines = [
+                "프로그램을 실행하면 일반 사용자 비밀번호를 입력해 홈 화면에 접근합니다.",
+                "홈에서는 오늘 일정과 다음 실행 예정 정보를 확인할 수 있고, 필요하면 '지금 즉시 실행'으로 강제 실행할 수 있습니다.",
+                "'요일 일정' 페이지에서 각 요일의 사용 여부, 시간, 자동/수동 음성을 조정합니다.",
+                "'플레이리스트'에서는 자동 지정에 사용할 음성 목록을 관리하고, 자동 배정 미리보기 표에서 적용될 음성을 확인합니다.",
+                "상단의 잠금 버튼을 누르면 창이 숨겨지고, 다시 열려면 트레이에서 '열기'를 눌러 비밀번호를 입력해야 합니다.",
+            ]
+            title = "일반 기능 도움말"
+        dialog = HelpDialog(title, lines, parent=self.window)
+        dialog.exec()
 
 
 if __name__ == "__main__":
