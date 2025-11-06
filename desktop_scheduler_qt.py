@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import html
 import json
 import os
+import platform
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -167,6 +171,7 @@ class SchedulerConfig:
     holiday_labels: Dict[str, str] = field(default_factory=dict)
     start_with_os: bool = False
     theme_accent: str = "#2A5CAA"
+    header_logo_path: Optional[str] = None
     audio_volume: float = 0.9
     shutdown_logs: List[Dict[str, str]] = field(default_factory=list)
     user_password_hash: str = field(default_factory=lambda: hash_password(DEFAULT_USER_PASSWORD))
@@ -199,6 +204,7 @@ class SchedulerConfig:
             "start_with_os",
             "theme_accent",
             "audio_volume",
+            "header_logo_path",
             "shutdown_logs",
             "user_password_hash",
             "admin_password_hash",
@@ -217,6 +223,8 @@ class SchedulerConfig:
             base.user_password_hash = hash_password(DEFAULT_USER_PASSWORD)
         if not isinstance(base.admin_password_hash, str) or not base.admin_password_hash:
             base.admin_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        if base.header_logo_path and not isinstance(base.header_logo_path, str):
+            base.header_logo_path = None
         try:
             base.audio_volume = float(base.audio_volume)
         except (TypeError, ValueError):
@@ -547,12 +555,103 @@ def set_startup(start_with_os: bool) -> None:
             except FileNotFoundError:
                 pass
 
+class AnimatedToggle(QtWidgets.QCheckBox):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setTristate(False)
+        self._offset = 1.0 if self.isChecked() else 0.0
+        self._animation = QtCore.QPropertyAnimation(self, b"offset", self)
+        self._animation.setDuration(220)
+        self._animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self.toggled.connect(self._animate)
+        self.setFixedSize(64, 34)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def sizeHint(self) -> QtCore.QSize:  # pragma: no cover - Qt sizing
+        return QtCore.QSize(64, 34)
+
+    def hitButton(self, pos: QtCore.QPoint) -> bool:  # pragma: no cover - Qt event
+        rect = self.rect().adjusted(-6, -4, 6, 4)
+        return rect.contains(pos)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # pragma: no cover - Qt paint
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        track_rect = QtCore.QRectF(7, 9, self.width() - 14, 16)
+        radius = track_rect.height() / 2
+        off_color = QtGui.QColor("#C4D4F4")
+        on_color = QtGui.QColor("#3B6FD6")
+        glow_color = QtGui.QColor("#AEC4FF")
+        glow_color.setAlphaF(0.35)
+        painter.setPen(Qt.NoPen)
+        blend = off_color
+        if self._offset > 0:
+            blend = QtGui.QColor(
+                off_color.red() + (on_color.red() - off_color.red()) * self._offset,
+                off_color.green() + (on_color.green() - off_color.green()) * self._offset,
+                off_color.blue() + (on_color.blue() - off_color.blue()) * self._offset,
+            )
+        painter.setBrush(blend)
+        painter.drawRoundedRect(track_rect, radius, radius)
+        knob_diameter = 22
+        travel = track_rect.width() - knob_diameter
+        knob_x = track_rect.left() + self._offset * max(travel, 1)
+        knob_rect = QtCore.QRectF(knob_x, (self.height() - knob_diameter) / 2, knob_diameter, knob_diameter)
+        painter.setBrush(Qt.white)
+        painter.drawEllipse(knob_rect)
+        if self._offset > 0:
+            glow_rect = knob_rect.adjusted(-3, -3, 3, 3)
+            painter.setBrush(glow_color)
+            painter.drawEllipse(glow_rect)
+        painter.end()
+
+    def _animate(self, checked: bool) -> None:
+        self._animation.stop()
+        self._animation.setStartValue(self._offset)
+        self._animation.setEndValue(1.0 if checked else 0.0)
+        if self.isVisible():
+            self._animation.start()
+        else:
+            self._offset = 1.0 if checked else 0.0
+            self.update()
+
+    def get_offset(self) -> float:
+        return self._offset
+
+    def set_offset(self, value: float) -> None:
+        self._offset = max(0.0, min(1.0, value))
+        self.update()
+
+    offset = QtCore.Property(float, fget=get_offset, fset=set_offset)
+
+
+def create_toggle_field(text: str, toggle: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
+    wrapper = QtWidgets.QWidget()
+    wrapper.setProperty("toggleContainer", True)
+    layout = QtWidgets.QHBoxLayout(wrapper)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(10)
+    layout.addWidget(toggle, 0, Qt.AlignLeft)
+    label = QtWidgets.QLabel(text)
+    label.setProperty("toggleLabel", True)
+    label.setBuddy(toggle)
+    layout.addWidget(label, 0, Qt.AlignLeft)
+    layout.addStretch(1)
+    return wrapper
+
 
 class FancyCard(QtWidgets.QFrame):
     def __init__(self, title: str, accent: str, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("FancyCard")
         self._accent = accent
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 10)
+        shadow.setColor(QtGui.QColor(28, 54, 119, 40))
+        self.setGraphicsEffect(shadow)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -572,8 +671,8 @@ class FancyCard(QtWidgets.QFrame):
 
     def _apply_styles(self) -> None:
         accent = QtGui.QColor(self._accent)
-        border = accent.lighter(130).name()
-        fill = accent.lighter(180).name()
+        border = accent.lighter(150).name()
+        fill = accent.lighter(220).name()
         title_color = accent.darker(140).name()
         subtitle_color = accent.darker(110).name()
         self.setStyleSheet(
@@ -619,8 +718,9 @@ class DayCard(FancyCard):
         layout = QtWidgets.QGridLayout()
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(10)
-        enable_chk = QtWidgets.QCheckBox("사용")
-        auto_chk = QtWidgets.QCheckBox("자동 음성")
+        enable_chk = AnimatedToggle()
+        enable_chk.setToolTip("이 요일의 일정을 활성화하거나 비활성화합니다.")
+        auto_chk = AnimatedToggle()
         time_edit = QtWidgets.QTimeEdit()
         time_edit.setDisplayFormat("HH:mm")
         manual_combo = QtWidgets.QComboBox()
@@ -629,19 +729,20 @@ class DayCard(FancyCard):
         manual_combo.setEditable(False)
         manual_combo.addItem("선택 안 함", None)
         manual_combo.setCurrentIndex(0)
-        remote_chk = QtWidgets.QCheckBox("원격 종료 허용")
-        local_chk = QtWidgets.QCheckBox("본체 종료")
+        remote_chk = AnimatedToggle()
+        local_chk = AnimatedToggle()
         auto_hint = QtWidgets.QLabel()
         auto_hint.setProperty("role", "subtitle")
         auto_hint.setWordWrap(True)
         auto_hint.hide()
-        for widget in (enable_chk, auto_chk, remote_chk, local_chk):
-            widget.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(enable_chk, 0, 0)
-        layout.addWidget(auto_chk, 0, 1)
+        layout.addWidget(create_toggle_field("사용", enable_chk), 0, 0)
+        auto_chk.setToolTip("플레이리스트에서 자동으로 음성을 지정할지 여부입니다.")
+        layout.addWidget(create_toggle_field("자동 음성", auto_chk), 0, 1)
         layout.addWidget(time_edit, 0, 2)
-        layout.addWidget(remote_chk, 1, 0)
-        layout.addWidget(local_chk, 1, 1)
+        remote_chk.setToolTip("일정 종료 시 원격 PC 종료 명령을 실행합니다.")
+        layout.addWidget(create_toggle_field("원격 종료 허용", remote_chk), 1, 0)
+        local_chk.setToolTip("일정 종료 시 이 PC를 종료합니다.")
+        layout.addWidget(create_toggle_field("본체 종료", local_chk), 1, 1)
         layout.addWidget(manual_combo, 2, 0, 1, 3)
         layout.addWidget(auto_hint, 3, 0, 1, 3)
         container = QtWidgets.QWidget()
@@ -850,11 +951,11 @@ class PlaylistPanel(FancyCard):
     def _preview_selected(self) -> None:
         item = self.list_widget.currentItem()
         if not item:
-            QtWidgets.QMessageBox.information(self, "안내", "미리 듣기할 파일을 선택하세요.")
+            show_info_message(self, "안내", "미리 듣기할 파일을 선택하세요.")
             return
         path = item.data(Qt.UserRole)
         if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "재생 불가", "파일을 찾을 수 없습니다. 경로를 확인해주세요.")
+            show_warning_message(self, "재생 불가", "파일을 찾을 수 없습니다. 경로를 확인해주세요.")
             return
         self._emit_preview(path)
 
@@ -980,12 +1081,12 @@ class HolidayPanel(FancyCard):
         self.set_subtitle("지정된 날짜에는 스케줄이 실행되지 않습니다")
         layout = QtWidgets.QVBoxLayout()
         layout.setSpacing(10)
-        toggle = QtWidgets.QCheckBox("휴일 기능 사용")
-        toggle.setCursor(Qt.PointingHandCursor)
-        weekend_toggle = QtWidgets.QCheckBox("주말(토·일) 자동 제외")
-        weekend_toggle.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(toggle)
-        layout.addWidget(weekend_toggle)
+        toggle = AnimatedToggle()
+        toggle.setToolTip("휴일에 등록된 날짜에는 일정이 실행되지 않습니다.")
+        weekend_toggle = AnimatedToggle()
+        weekend_toggle.setToolTip("토요일과 일요일을 자동으로 휴일로 처리합니다.")
+        layout.addWidget(create_toggle_field("휴일 기능 사용", toggle))
+        layout.addWidget(create_toggle_field("주말(토·일) 자동 제외", weekend_toggle))
         summary = QtWidgets.QLabel()
         summary.setProperty("role", "subtitle")
         layout.addWidget(summary)
@@ -1139,7 +1240,7 @@ class HolidayPanel(FancyCard):
             except UnicodeDecodeError:
                 text = Path(path).read_text(encoding="cp949")
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "읽기 실패", f"파일을 읽을 수 없습니다:\n{exc}")
+            show_warning_message(self, "읽기 실패", f"파일을 읽을 수 없습니다.\n{exc}")
             return
         unfolded: List[str] = []
         for line in text.splitlines():
@@ -1180,7 +1281,7 @@ class HolidayPanel(FancyCard):
                     except ValueError:
                         continue
         if not events:
-            QtWidgets.QMessageBox.information(self, "안내", "추출된 휴일 정보가 없습니다.")
+            show_info_message(self, "안내", "추출된 휴일 정보가 없습니다.")
             return
         added = 0
         labeled = 0
@@ -1198,7 +1299,7 @@ class HolidayPanel(FancyCard):
 
         self.cfg_mgr.update(updater)
         self.refresh()
-        QtWidgets.QMessageBox.information(
+        show_success_message(
             self,
             "가져오기 완료",
             f"총 {len(events)}건 중 새로 추가 {added}건, 라벨 갱신 {labeled}건",
@@ -1236,7 +1337,7 @@ class HolidayPanel(FancyCard):
     def _remove_selected(self, widget: QtWidgets.QListWidget) -> None:
         items = widget.selectedItems()
         if not items:
-            QtWidgets.QMessageBox.information(self, "안내", "삭제할 항목을 선택하세요.")
+            show_info_message(self, "안내", "삭제할 항목을 선택하세요.")
             return
         for item in items:
             key = item.data(Qt.UserRole)
@@ -1274,12 +1375,15 @@ class SettingsPanel(FancyCard):
         form = QtWidgets.QFormLayout()
         form.setSpacing(12)
         self.target_edit = QtWidgets.QLineEdit(", ".join(cfg_mgr.config.targets))
-        self.remote_toggle = QtWidgets.QCheckBox("원격 종료 활성화")
+        self.remote_toggle = AnimatedToggle()
         self.remote_toggle.setChecked(cfg_mgr.config.enable_remote_shutdown)
-        self.local_toggle = QtWidgets.QCheckBox("본체 종료 활성화")
+        self.remote_toggle.setToolTip("스케줄 종료 후 원격 PC 종료 명령을 전송합니다.")
+        self.local_toggle = AnimatedToggle()
         self.local_toggle.setChecked(cfg_mgr.config.enable_local_shutdown)
-        self.startup_toggle = QtWidgets.QCheckBox("Windows 시작 시 자동 실행")
+        self.local_toggle.setToolTip("스케줄 종료 후 이 PC를 종료합니다.")
+        self.startup_toggle = AnimatedToggle()
         self.startup_toggle.setChecked(cfg_mgr.config.start_with_os)
+        self.startup_toggle.setToolTip("Windows 로그인 시 프로그램을 자동 실행합니다.")
         self.delay_spin = QtWidgets.QSpinBox()
         self.delay_spin.setRange(0, 300)
         self.delay_spin.setValue(cfg_mgr.config.shutdown_delay)
@@ -1293,6 +1397,17 @@ class SettingsPanel(FancyCard):
         path_change_btn.setCursor(Qt.PointingHandCursor)
         path_row.addWidget(self.config_path_label, 1)
         path_row.addWidget(path_change_btn)
+        logo_row = QtWidgets.QHBoxLayout()
+        self.logo_path_label = QtWidgets.QLabel()
+        self.logo_path_label.setWordWrap(True)
+        self.logo_path_label.setProperty("role", "subtitle")
+        self.logo_choose_btn = QtWidgets.QPushButton("로고 선택")
+        self.logo_clear_btn = QtWidgets.QPushButton("기본값")
+        for btn in (self.logo_choose_btn, self.logo_clear_btn):
+            btn.setCursor(Qt.PointingHandCursor)
+        logo_row.addWidget(self.logo_path_label, 1)
+        logo_row.addWidget(self.logo_choose_btn)
+        logo_row.addWidget(self.logo_clear_btn)
         password_row = QtWidgets.QHBoxLayout()
         self.user_password_btn = QtWidgets.QPushButton("일반 비밀번호 변경")
         self.admin_password_btn = QtWidgets.QPushButton("관리자 비밀번호 변경")
@@ -1302,12 +1417,13 @@ class SettingsPanel(FancyCard):
         password_row.addWidget(self.admin_password_btn)
         password_row.addStretch(1)
         form.addRow("종료 대상 프로그램", self.target_edit)
-        form.addRow("원격 종료", self.remote_toggle)
-        form.addRow("본체 종료", self.local_toggle)
+        form.addRow("원격 종료", create_toggle_field("사용", self.remote_toggle))
+        form.addRow("본체 종료", create_toggle_field("사용", self.local_toggle))
         form.addRow("종료 지연(초)", self.delay_spin)
-        form.addRow("시작 프로그램 등록", self.startup_toggle)
+        form.addRow("시작 프로그램 등록", create_toggle_field("사용", self.startup_toggle))
         form.addRow("테마", self.accent_btn)
         form.addRow("설정 저장 위치", path_row)
+        form.addRow("상단 로고", logo_row)
         form.addRow("비밀번호 관리", password_row)
         outer.addLayout(form)
         hosts_group = QtWidgets.QGroupBox("원격 PC 목록")
@@ -1359,6 +1475,8 @@ class SettingsPanel(FancyCard):
         self.cfg_mgr.storage_dir_changed.connect(self._on_storage_dir_changed)
         self.user_password_btn.clicked.connect(self._change_user_password)
         self.admin_password_btn.clicked.connect(self._change_admin_password)
+        self.logo_choose_btn.clicked.connect(self._choose_logo_image)
+        self.logo_clear_btn.clicked.connect(self._clear_logo_image)
         self.test_completed.connect(self._on_test_result)
         self._targets_timer = QtCore.QTimer(self)
         self._targets_timer.setSingleShot(True)
@@ -1366,6 +1484,7 @@ class SettingsPanel(FancyCard):
         self._targets_timer.timeout.connect(self._persist_targets)
         self.target_edit.textChanged.connect(lambda _: self._targets_timer.start())
         self._loading_hosts = False
+        self._update_logo_summary(self.cfg_mgr.config.header_logo_path)
         self._load_hosts()
 
     def _persist_targets(self) -> None:
@@ -1410,6 +1529,7 @@ class SettingsPanel(FancyCard):
         self.delay_spin.blockSignals(False)
         self._load_hosts()
         self._update_config_path_label()
+        self._update_logo_summary(cfg.header_logo_path)
 
     def _load_hosts(self) -> None:
         self._loading_hosts = True
@@ -1448,7 +1568,7 @@ class SettingsPanel(FancyCard):
     def _test_host(self) -> None:
         row = self.host_table.currentRow()
         if row < 0:
-            QtWidgets.QMessageBox.information(self, "안내", "시험할 원격 PC 행을 선택하세요.")
+            show_info_message(self, "안내", "시험할 원격 PC 행을 선택하세요.")
             return
         entry = {
             "host": self._table_text(row, 0),
@@ -1458,7 +1578,7 @@ class SettingsPanel(FancyCard):
         }
         host = entry["host"].strip()
         if not host:
-            QtWidgets.QMessageBox.warning(self, "오류", "대상 호스트를 먼저 입력하세요.")
+            show_warning_message(self, "오류", "대상 호스트를 먼저 입력하세요.")
             return
         self.test_host_btn.setEnabled(False)
         self.test_host_btn.setText("시험 중…")
@@ -1494,6 +1614,29 @@ class SettingsPanel(FancyCard):
                 return name, int(port_str)
         return target, default_port
 
+    @staticmethod
+    def _ping_host(host: str, timeout: int = 2) -> Tuple[Optional[bool], str]:
+        if not shutil.which("ping"):
+            return None, "ping 명령을 찾을 수 없어 포트 연결만 확인했습니다."
+        system = platform.system().lower()
+        if "win" in system:
+            command = ["ping", "-n", "1", "-w", str(max(1, timeout) * 1000), host]
+        else:
+            command = ["ping", "-c", "1", "-W", str(max(1, timeout)), host]
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=max(3, timeout + 2),
+            )
+        except Exception as exc:
+            return None, f"ping 명령을 실행할 수 없습니다: {exc}"
+        output = (result.stdout or "").strip()
+        return (result.returncode == 0), output
+
     def _perform_connection_test(self, entry: Dict[str, str]) -> Tuple[bool, str]:
         method = entry.get("method", "ssh").lower()
         host_text = entry.get("host", "").strip()
@@ -1508,9 +1651,21 @@ class SettingsPanel(FancyCard):
         host_name, port = self._split_host_port(host_text, default_port)
         if not host_name:
             return False, "호스트 정보를 해석할 수 없습니다."
+        ping_result, ping_detail = self._ping_host(host_name)
+        if ping_result is False:
+            detail = ping_detail or "네트워크 응답이 없습니다."
+            return False, f"{host_name}에 ping 응답이 없습니다.\n{detail}"
+        notes: List[str] = []
+        if ping_result is True:
+            notes.append(f"{host_name} ping 응답 확인")
+        elif ping_detail:
+            notes.append(ping_detail)
         if method == "ssh":
             if not paramiko:
-                return False, "Paramiko 모듈이 설치되어 있지 않아 SSH 연결을 시험할 수 없습니다."
+                details = "Paramiko 모듈이 설치되어 있지 않아 SSH 연결을 시험할 수 없습니다."
+                if notes:
+                    details = "\n".join(notes + [details])
+                return False, details
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
@@ -1523,23 +1678,27 @@ class SettingsPanel(FancyCard):
                 )
                 ssh.exec_command("echo connection_test")
                 ssh.close()
-                return True, f"{host_name}:{port} SSH 연결에 성공했습니다."
+                notes.append(f"{host_name}:{port} SSH 연결에 성공했습니다.")
+                return True, "\n".join(notes)
             except Exception as exc:
-                return False, f"{host_name}:{port} SSH 연결 실패: {exc}"
+                notes.append(f"{host_name}:{port} SSH 연결 실패: {exc}")
+                return False, "\n".join(notes)
         else:
             try:
                 with socket.create_connection((host_name, port), timeout=6):
-                    return True, f"{host_name}:{port} 포트에 접속할 수 있습니다."
+                    notes.append(f"{host_name}:{port} 포트에 접속할 수 있습니다.")
+                    return True, "\n".join(notes)
             except Exception as exc:
-                return False, f"{host_name}:{port} 포트 연결 실패: {exc}"
+                notes.append(f"{host_name}:{port} 포트 연결 실패: {exc}")
+                return False, "\n".join(notes)
 
     def _on_test_result(self, success: bool, message: str) -> None:
         self.test_host_btn.setEnabled(True)
         self.test_host_btn.setText("연결 시험")
         if success:
-            QtWidgets.QMessageBox.information(self, "연결 성공", message)
+            show_success_message(self, "연결 성공", message)
         else:
-            QtWidgets.QMessageBox.warning(self, "연결 실패", message)
+            show_warning_message(self, "연결 실패", message)
 
     def _add_host(self) -> None:
         row = self.host_table.rowCount()
@@ -1556,7 +1715,7 @@ class SettingsPanel(FancyCard):
     def _remove_host(self) -> None:
         rows = sorted({index.row() for index in self.host_table.selectedIndexes()}, reverse=True)
         if not rows:
-            QtWidgets.QMessageBox.information(self, "안내", "삭제할 항목을 선택하세요.")
+            show_info_message(self, "안내", "삭제할 항목을 선택하세요.")
             return
         self._loading_hosts = True
         for row in rows:
@@ -1579,6 +1738,19 @@ class SettingsPanel(FancyCard):
         self.config_path_label.setText(target)
         self.config_path_label.setToolTip(target)
 
+    def _update_logo_summary(self, path: Optional[str]) -> None:
+        if path:
+            name = Path(path).name
+            exists = Path(path).exists()
+            status = "사용 중" if exists else "확인 필요"
+            text = f"{status}: {name}"
+            tooltip = path
+        else:
+            text = "기본 로고 사용 중"
+            tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
+        self.logo_path_label.setText(text)
+        self.logo_path_label.setToolTip(tooltip)
+
     def _change_user_password(self) -> None:
         dialog = PasswordChangeDialog("일반 사용자 비밀번호 변경", require_current=False, parent=self)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
@@ -1588,21 +1760,50 @@ class SettingsPanel(FancyCard):
             cfg.user_password_hash = hash_password(dialog.new_password)
 
         self.cfg_mgr.update(updater)
-        QtWidgets.QMessageBox.information(self, "완료", "일반 사용자 비밀번호가 변경되었습니다.")
+        show_success_message(self, "완료", "일반 사용자 비밀번호가 변경되었습니다.")
 
     def _change_admin_password(self) -> None:
         dialog = PasswordChangeDialog("관리자 비밀번호 변경", require_current=True, parent=self)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         if not verify_password(self.cfg_mgr.config.admin_password_hash, dialog.current_password):
-            QtWidgets.QMessageBox.warning(self, "오류", "현재 관리자 비밀번호가 일치하지 않습니다.")
+            show_warning_message(self, "오류", "현재 관리자 비밀번호가 일치하지 않습니다.")
             return
 
         def updater(cfg: SchedulerConfig) -> None:
             cfg.admin_password_hash = hash_password(dialog.new_password)
 
         self.cfg_mgr.update(updater)
-        QtWidgets.QMessageBox.information(self, "완료", "관리자 비밀번호가 변경되었습니다.")
+        show_success_message(self, "완료", "관리자 비밀번호가 변경되었습니다.")
+
+    def _choose_logo_image(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "로고 이미지 선택",
+            str(Path.home()),
+            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif)",
+        )
+        if not path:
+            return
+
+        def updater(cfg: SchedulerConfig) -> None:
+            cfg.header_logo_path = path
+
+        self.cfg_mgr.update(updater)
+        self._update_logo_summary(path)
+        show_success_message(self, "상단 로고", "선택한 이미지가 상단 바에 적용되었습니다.")
+
+    def _clear_logo_image(self) -> None:
+        if not self.cfg_mgr.config.header_logo_path:
+            self._update_logo_summary(None)
+            return
+
+        def updater(cfg: SchedulerConfig) -> None:
+            cfg.header_logo_path = None
+
+        self.cfg_mgr.update(updater)
+        self._update_logo_summary(None)
+        show_info_message(self, "상단 로고", "기본 로고로 돌아갔습니다.")
 
 class DateRangeDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
@@ -1632,7 +1833,7 @@ class DateRangeDialog(QtWidgets.QDialog):
         start = self.start_calendar.selectedDate().toPython()
         end = self.end_calendar.selectedDate().toPython()
         if end < start:
-            QtWidgets.QMessageBox.warning(self, "오류", "종료일은 시작일 이후여야 합니다")
+            show_warning_message(self, "오류", "종료일은 시작일 이후여야 합니다.")
             return
         self.result_range = (start.isoformat(), end.isoformat())
         super().accept()
@@ -1784,6 +1985,107 @@ def _apply_popup_typography(dialog: QtWidgets.QDialog) -> None:
         button.setFont(button_font)
         button.setMinimumHeight(42)
         button.setCursor(Qt.PointingHandCursor)
+
+def _format_message_html(text: str) -> str:
+    blocks = [block.strip("\n") for block in text.split("\n\n")]
+    paragraphs = []
+    for block in blocks:
+        if not block:
+            continue
+        lines = [html.escape(part) for part in block.splitlines()]
+        paragraphs.append("<p style='margin:0 0 10px 0;'>" + "<br>".join(lines) + "</p>")
+    if not paragraphs:
+        return "<p style='margin:0;'>" + html.escape(text.strip()) + "</p>"
+    return "".join(paragraphs)
+
+
+def _apply_messagebox_typography(box: QtWidgets.QMessageBox, level: str) -> None:
+    font_family = "Noto Sans KR"
+    palette = box.palette()
+    palette.setColor(QPalette.Window, QColor("#F4F7FF"))
+    palette.setColor(QPalette.WindowText, QColor("#0F172A"))
+    box.setPalette(palette)
+    accent = "#2A5CAA"
+    tone_map = {
+        "info": "#0F172A",
+        "success": "#0F5B3A",
+        "warning": "#8C3C10",
+        "error": "#9C1F1F",
+    }
+    text_color = tone_map.get(level, tone_map["info"])
+    box.setStyleSheet(
+        f"""
+        QMessageBox {{
+            background-color: #F4F7FF;
+            border-radius: 18px;
+        }}
+        QMessageBox QLabel {{
+            color: {text_color};
+            font-family: '{font_family}';
+        }}
+        QMessageBox QPushButton {{
+            background-color: {accent};
+            border-radius: 12px;
+            padding: 8px 22px;
+            color: #FFFFFF;
+            font-family: '{font_family}';
+            font-weight: 700;
+            font-size: 15px;
+        }}
+        QMessageBox QPushButton:hover {{
+            background-color: #3B6FD6;
+        }}
+        QMessageBox QPushButton:pressed {{
+            background-color: #305DC1;
+        }}
+        """
+    )
+    label = box.findChild(QtWidgets.QLabel, "qt_msgbox_label")
+    if label is not None:
+        font = QFont(font_family, 16)
+        font.setWeight(QFont.DemiBold)
+        label.setFont(font)
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.RichText)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    info = box.findChild(QtWidgets.QLabel, "qt_msgboxex_icon_label")
+    if info is not None:
+        info.setMaximumWidth(64)
+    for button in box.findChildren(QtWidgets.QPushButton):
+        button.setCursor(Qt.PointingHandCursor)
+
+
+def _show_message(parent, title: str, text: str, level: str = "info") -> QtWidgets.QMessageBox.StandardButton:
+    icon_map = {
+        "info": QtWidgets.QMessageBox.Information,
+        "success": QtWidgets.QMessageBox.Information,
+        "warning": QtWidgets.QMessageBox.Warning,
+        "error": QtWidgets.QMessageBox.Critical,
+    }
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(icon_map.get(level, QtWidgets.QMessageBox.Information))
+    box.setTextFormat(Qt.RichText)
+    box.setText(_format_message_html(text))
+    box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+    _apply_messagebox_typography(box, level)
+    return box.exec()
+
+
+def show_info_message(parent, title: str, text: str) -> QtWidgets.QMessageBox.StandardButton:
+    return _show_message(parent, title, text, "info")
+
+
+def show_success_message(parent, title: str, text: str) -> QtWidgets.QMessageBox.StandardButton:
+    return _show_message(parent, title, text, "success")
+
+
+def show_warning_message(parent, title: str, text: str) -> QtWidgets.QMessageBox.StandardButton:
+    return _show_message(parent, title, text, "warning")
+
+
+def show_error_message(parent, title: str, text: str) -> QtWidgets.QMessageBox.StandardButton:
+    return _show_message(parent, title, text, "error")
 
 
 class PasswordPrompt(QtWidgets.QDialog):
@@ -2076,6 +2378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._connect_signals()
         self.scheduler.start()
+        self._update_header_logo(self.cfg_mgr.config.header_logo_path)
 
     def _build_palette(self) -> None:
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
@@ -2130,6 +2433,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #F4511E;
             }}
             QCheckBox, QLabel {{ color: {text_hex}; }}
+            QWidget[toggleContainer="true"] {{
+                background: transparent;
+            }}
+            QWidget[toggleContainer="true"] QLabel[toggleLabel="true"] {{
+                color: {text_hex};
+                font-weight: 600;
+                font-size: 14px;
+            }}
             QLabel#PageTitle {{
                 font-weight: 700;
                 font-size: 20px;
@@ -2138,6 +2449,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#PageTitle:hover {{
                 color: {accent_hex};
                 text-decoration: underline;
+            }}
+            QLabel#HeaderLogo {{
+                background: rgba(255, 255, 255, 0.78);
+                border-radius: 18px;
+                padding: 6px 18px;
+                border: 1px solid {outline_hex};
             }}
             QListWidget {{
                 background: #FFFFFF;
@@ -2211,7 +2528,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.drawer = QtWidgets.QFrame()
         self.drawer.setObjectName("NavDrawer")
-        self.drawer.setFixedWidth(240)
+        self.drawer_width = 240
+        self.drawer.setMinimumWidth(0)
+        self.drawer.setMaximumWidth(self.drawer_width)
         drawer_layout = QtWidgets.QVBoxLayout(self.drawer)
         drawer_layout.setContentsMargins(20, 28, 20, 28)
         drawer_layout.setSpacing(12)
@@ -2243,6 +2562,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.page_title.setToolTip("상단 제목(현재 페이지 이름)을 5회 연속 클릭하면 관리자 모드로 전환할 수 있습니다.")
         top_layout.addWidget(self.page_title, 0)
         top_layout.addStretch(1)
+        self.logo_container = QtWidgets.QWidget()
+        self.logo_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        logo_layout = QtWidgets.QHBoxLayout(self.logo_container)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.setSpacing(0)
+        logo_layout.addStretch(1)
+        self.logo_label = QtWidgets.QLabel()
+        self.logo_label.setObjectName("HeaderLogo")
+        self.logo_label.setAlignment(Qt.AlignCenter)
+        self.logo_label.setFixedHeight(46)
+        logo_layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
+        logo_layout.addStretch(1)
+        top_layout.addWidget(self.logo_container, 1)
+        top_layout.addStretch(1)
         self.help_button = QtWidgets.QPushButton("도움말")
         self.help_button.setObjectName("HelpButton")
         self.help_button.setCursor(Qt.PointingHandCursor)
@@ -2258,6 +2591,12 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.addWidget(self.lock_button, 0)
         content_layout.addWidget(top_bar, 0)
         self.content_stack = QtWidgets.QStackedWidget()
+        self._stack_effect = QtWidgets.QGraphicsOpacityEffect(self.content_stack)
+        self.content_stack.setGraphicsEffect(self._stack_effect)
+        self._stack_effect.setOpacity(1.0)
+        self._page_anim = QtCore.QPropertyAnimation(self._stack_effect, b"opacity", self)
+        self._page_anim.setDuration(260)
+        self._page_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         content_layout.addWidget(self.content_stack, 1)
 
         root_layout.addWidget(self.drawer)
@@ -2347,6 +2686,12 @@ class MainWindow(QtWidgets.QMainWindow):
             drawer_layout.addWidget(btn)
 
         drawer_layout.addStretch(1)
+        self._drawer_anim = QtCore.QPropertyAnimation(self.drawer, b"maximumWidth", self)
+        self._drawer_anim.setDuration(240)
+        self._drawer_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+        self._drawer_anim.finished.connect(self._on_drawer_animation_finished)
+        self._drawer_target_width = 0
+        self.drawer.setMaximumWidth(0)
         self.drawer.hide()
         self.menu_button.clicked.connect(self._toggle_drawer)
         self.log_card.clear_requested.connect(self._clear_logs)
@@ -2381,7 +2726,26 @@ class MainWindow(QtWidgets.QMainWindow):
         return scroll
 
     def _toggle_drawer(self) -> None:
-        self.drawer.setVisible(not self.drawer.isVisible())
+        opening = not self.drawer.isVisible()
+        self._drawer_anim.stop()
+        if opening:
+            self.drawer.show()
+            self.drawer.raise_()
+            self.drawer.setMaximumWidth(0)
+            self._drawer_anim.setStartValue(0)
+            self._drawer_target_width = self.drawer_width
+            self._drawer_anim.setEndValue(self.drawer_width)
+        else:
+            current = max(1, self.drawer.width())
+            self._drawer_anim.setStartValue(current)
+            self._drawer_target_width = 0
+            self._drawer_anim.setEndValue(0)
+        self._drawer_anim.start()
+
+    def _on_drawer_animation_finished(self) -> None:
+        if self._drawer_target_width == 0:
+            self.drawer.hide()
+        self.drawer.setMaximumWidth(self.drawer_width)
 
     def set_locked(self, locked: bool) -> None:
         self._locked = locked
@@ -2418,13 +2782,21 @@ class MainWindow(QtWidgets.QMainWindow):
         index = self._page_indices.get(name)
         if index is None:
             return
-        self.content_stack.setCurrentIndex(index)
+        current = self.content_stack.currentIndex()
+        if current != index:
+            self.content_stack.setCurrentIndex(index)
+            self._page_anim.stop()
+            self._stack_effect.setOpacity(0.0)
+            self._page_anim.setStartValue(0.0)
+            self._page_anim.setEndValue(1.0)
+            self._page_anim.start()
         self.page_title.setText(name)
         button = self._nav_buttons.get(name)
         if button and not button.isChecked():
             button.setChecked(True)
         if self.drawer.isVisible():
-            self.drawer.hide()
+            if self._drawer_target_width != 0 or self._drawer_anim.state() != QtCore.QAbstractAnimation.Running:
+                self._toggle_drawer()
 
     def _preview_audio_for_today(self) -> Optional[str]:
         cfg = self.cfg_mgr.config
@@ -2508,6 +2880,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_config_changed(self, cfg: SchedulerConfig) -> None:
         self.audio_service.set_volume(cfg.audio_volume)
         self._apply_theme(cfg.theme_accent)
+        self._update_header_logo(cfg.header_logo_path)
         self.playlist_panel.refresh()
         self.assignment_preview.refresh()
         self.holiday_panel.refresh()
@@ -2517,6 +2890,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_today_summary()
         self.log_card.update_logs(cfg.shutdown_logs)
         self.scheduler._compute_next_run()
+
+    def _generate_header_logo(self) -> QtGui.QPixmap:
+        pixmap = QtGui.QPixmap(200, 54)
+        pixmap.fill(Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
+        gradient = QtGui.QLinearGradient(0, 0, pixmap.width(), pixmap.height())
+        gradient.setColorAt(0.0, accent.lighter(130))
+        gradient.setColorAt(1.0, accent.darker(110))
+        painter.setBrush(gradient)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(6, 6, pixmap.width() - 12, pixmap.height() - 12, 20, 20)
+        painter.setPen(Qt.white)
+        font = QtGui.QFont("Noto Sans KR", 18, QtGui.QFont.Black)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "AutoClose Studio")
+        painter.end()
+        return pixmap
+
+    def _update_header_logo(self, path: Optional[str]) -> None:
+        pixmap: Optional[QtGui.QPixmap] = None
+        tooltip = "상단 바에 표시할 로고 이미지를 고급 설정에서 선택하세요."
+        if path:
+            candidate = QtGui.QPixmap(path)
+            if not candidate.isNull():
+                pixmap = candidate
+                tooltip = path
+        if pixmap is None:
+            pixmap = self._generate_header_logo()
+        scaled = pixmap.scaledToHeight(44, Qt.SmoothTransformation)
+        self.logo_label.setPixmap(scaled)
+        self.logo_label.setToolTip(tooltip)
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.page_title and event.type() == QtCore.QEvent.MouseButtonPress:
@@ -2586,7 +2992,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_preview_requested(self, path: str) -> None:
         if self._playback_mode == "schedule":
-            QtWidgets.QMessageBox.warning(self, "진행 중", "일정 실행 중에는 미리 듣기를 사용할 수 없습니다.")
+            show_warning_message(self, "진행 중", "일정 실행 중에는 미리 듣기를 사용할 수 없습니다.")
             return
         if self.audio_service.player.playbackState() != QMediaPlayer.StoppedState:
             self._ignore_playback_finished = True
@@ -2603,7 +3009,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._playback_mode == "preview":
             self.audio_service.stop()
         else:
-            QtWidgets.QMessageBox.information(self, "안내", "현재 미리 듣기 중이 아닙니다.")
+            show_info_message(self, "안내", "현재 미리 듣기 중이 아닙니다.")
 
     def _on_playback_started(self, path: str) -> None:
         if self._playback_mode != "schedule":
@@ -2715,7 +3121,7 @@ class App(QtWidgets.QApplication):
         )
         if prompt.exec() == QtWidgets.QDialog.Accepted:
             self.window.set_mode("admin")
-            QtWidgets.QMessageBox.information(
+            show_success_message(
                 self.window,
                 "관리자 모드",
                 "고급 기능이 활성화되었습니다. '관리자 모드 종료' 버튼으로 일반 모드로 돌아갈 수 있습니다.",
