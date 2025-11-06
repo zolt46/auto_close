@@ -56,6 +56,19 @@ AUTHOR_NAME = "Zolt46 / PSW / Emanon108"
 DEFAULT_USER_PASSWORD = "0000"
 DEFAULT_ADMIN_PASSWORD = "000000"
 
+APP_DIR = Path(__file__).resolve().parent
+
+
+def resource_path(relative: str) -> Path:
+    """exe 패키징(PyInstaller 등) 이후에도 자원 경로를 안전하게 찾는다."""
+
+    base_dir = Path(getattr(sys, "_MEIPASS", APP_DIR))  # type: ignore[attr-defined]
+    return base_dir / relative
+
+
+DEFAULT_ASSET_DIR = "assets"
+DEFAULT_HEADER_LOGO = resource_path(f"{DEFAULT_ASSET_DIR}/topbar_logo.png")
+DEFAULT_APP_ICON = resource_path(f"{DEFAULT_ASSET_DIR}/app_icon.ico")
 
 def hash_password(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -68,6 +81,20 @@ def verify_password(stored_hash: str, attempt: str) -> bool:
         return stored_hash == hash_password(attempt)
     except Exception:
         return False
+
+
+def coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
 
 class ConfigLocator:
     """현재 설정 파일 위치를 추적하고 변경을 돕는 도우미."""
@@ -168,7 +195,7 @@ class SchedulerConfig:
     enable_local_shutdown: bool = True
     shutdown_delay: int = 5
     holidays_enabled: bool = True
-    auto_skip_weekends: bool = False
+    auto_skip_weekends: bool = True
     holidays: List[str] = field(default_factory=list)
     holiday_ranges: List[Dict[str, str]] = field(default_factory=list)
     holiday_labels: Dict[str, str] = field(default_factory=dict)
@@ -220,6 +247,7 @@ class SchedulerConfig:
         for missing in DAY_KEYS:
             days.setdefault(missing, DaySchedule(enabled=(missing not in {"sat", "sun"})))
         base.days = days
+        base.auto_skip_weekends = coerce_bool(data.get("auto_skip_weekends", base.auto_skip_weekends), base.auto_skip_weekends)
         if not isinstance(base.holiday_labels, dict):
             base.holiday_labels = {}
         if not isinstance(base.user_password_hash, str) or not base.user_password_hash:
@@ -1103,8 +1131,12 @@ class HolidayPanel(FancyCard):
 
     def refresh(self) -> None:
         cfg = self.cfg_mgr.config
+        self.toggle.blockSignals(True)
         self.toggle.setChecked(cfg.holidays_enabled)
+        self.toggle.blockSignals(False)
+        self.weekend_toggle.blockSignals(True)
         self.weekend_toggle.setChecked(cfg.auto_skip_weekends)
+        self.weekend_toggle.blockSignals(False)
         singles = sorted(cfg.holidays)
         self.single_list.clear()
         for iso in singles:
@@ -1129,6 +1161,10 @@ class HolidayPanel(FancyCard):
     def _persist(self) -> None:
         enabled = self.toggle.isChecked()
         skip_weekends = self.weekend_toggle.isChecked()
+
+        current = self.cfg_mgr.config
+        if current.holidays_enabled == enabled and current.auto_skip_weekends == skip_weekends:
+            return
 
         def updater(cfg: SchedulerConfig) -> None:
             cfg.holidays_enabled = enabled
@@ -1762,8 +1798,12 @@ class SettingsPanel(FancyCard):
             text = f"{status}: {name}"
             tooltip = path
         else:
-            text = "기본 로고 사용 중"
-            tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
+            if DEFAULT_HEADER_LOGO.exists():
+                text = f"기본 로고 사용 중 ({DEFAULT_HEADER_LOGO.name})"
+                tooltip = str(DEFAULT_HEADER_LOGO)
+            else:
+                text = "기본 로고 사용 중"
+                tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
         self.logo_path_label.setText(text)
         self.logo_path_label.setToolTip(tooltip)
 
@@ -2457,8 +2497,18 @@ class StatusOverlay(QtWidgets.QWidget):
             self.move(frame.topLeft())
         self.show()
 
+def _load_brand_icon() -> Optional[QIcon]:
+    if DEFAULT_APP_ICON.exists():
+        icon = QIcon(str(DEFAULT_APP_ICON))
+        if not icon.isNull():
+            return icon
+    return None
+
 
 def create_tray_icon(accent_color: str) -> QIcon:
+    brand_icon = _load_brand_icon()
+    if brand_icon is not None:
+        return brand_icon
     pixmap = QtGui.QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QtGui.QPainter(pixmap)
@@ -3019,11 +3069,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_header_logo(self, path: Optional[str]) -> None:
         pixmap: Optional[QtGui.QPixmap] = None
         tooltip = "상단 바에 표시할 로고 이미지를 고급 설정에서 선택하세요."
+        candidates: List[Path] = []
         if path:
-            candidate = QtGui.QPixmap(path)
-            if not candidate.isNull():
-                pixmap = candidate
-                tooltip = path
+            candidates.append(Path(path))
+        candidates.append(DEFAULT_HEADER_LOGO)
+        for candidate_path in candidates:
+            if not candidate_path:
+                continue
+            if candidate_path.exists():
+                candidate = QtGui.QPixmap(str(candidate_path))
+                if not candidate.isNull():
+                    pixmap = candidate
+                    tooltip = str(candidate_path)
+                    break
         if pixmap is None:
             pixmap = self._generate_header_logo()
         scaled = pixmap.scaledToHeight(44, Qt.SmoothTransformation)
