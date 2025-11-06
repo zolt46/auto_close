@@ -1,5 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import importlib.util
+
+_pathlib_spec = importlib.util.find_spec("pathlib")
+if _pathlib_spec and _pathlib_spec.origin and "site-packages" in _pathlib_spec.origin:
+    raise SystemExit(
+        "PyInstaller와 호환되지 않는 pip backport 'pathlib'가 설치되어 있습니다. "
+        "명령 프롬프트에서 'python -m pip uninstall pathlib'를 실행한 뒤 다시 시도하세요."
+    )
+
 from pathlib import Path
 
 import PySide6
