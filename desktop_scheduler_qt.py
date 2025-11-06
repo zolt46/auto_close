@@ -50,6 +50,9 @@ from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
+APP_VERSION = "2.1.2"
+BUILD_DATE = "2025-11-06"
+AUTHOR_NAME = "Zolt46 / PSW / Emanon108"
 DEFAULT_USER_PASSWORD = "0000"
 DEFAULT_ADMIN_PASSWORD = "000000"
 
@@ -1325,6 +1328,7 @@ class HolidayPanel(FancyCard):
 
 class SettingsPanel(FancyCard):
     test_completed = Signal(bool, str)
+    log_generated = Signal(str)
 
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
         super().__init__("고급 설정", accent, parent)
@@ -1438,6 +1442,7 @@ class SettingsPanel(FancyCard):
         self.logo_choose_btn.clicked.connect(self._choose_logo_image)
         self.logo_clear_btn.clicked.connect(self._clear_logo_image)
         self.test_completed.connect(self._on_test_result)
+        self.log_generated.connect(self._append_test_log)
         self._targets_timer = QtCore.QTimer(self)
         self._targets_timer.setSingleShot(True)
         self._targets_timer.setInterval(400)
@@ -1446,6 +1451,7 @@ class SettingsPanel(FancyCard):
         self._loading_hosts = False
         self._update_logo_summary(self.cfg_mgr.config.header_logo_path)
         self._load_hosts()
+        self._log_dialog: Optional[TerminalLogDialog] = None
 
     def _persist_targets(self) -> None:
         raw = [p.strip() for p in self.target_edit.text().split(",") if p.strip()]
@@ -1542,15 +1548,35 @@ class SettingsPanel(FancyCard):
             return
         self.test_host_btn.setEnabled(False)
         self.test_host_btn.setText("시험 중…")
+        dialog = self._ensure_log_dialog()
+        dialog.start_session(host)
+        self.log_generated.emit("============================================================")
+        self.log_generated.emit(f"TARGET   : {host} ({entry['method'].upper()})")
+        user = entry.get("username") or "-"
+        self.log_generated.emit(f"USERNAME : {user}")
 
         def worker(payload: Dict[str, str]) -> None:
+            def emit_log(line: str) -> None:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.log_generated.emit(f"[{timestamp}] {line}")
+
             try:
-                success, message = self._perform_connection_test(payload)
+                success, message = self._perform_connection_test(payload, emit_log)
             except Exception as exc:  # pragma: no cover - 네트워크 예외 보호
+                emit_log(f"예상치 못한 오류 발생: {exc}")
                 success, message = False, f"예상치 못한 오류: {exc}"
             self.test_completed.emit(success, message)
 
         threading.Thread(target=worker, args=(entry,), daemon=True).start()
+
+    def _ensure_log_dialog(self) -> TerminalLogDialog:
+        if self._log_dialog is None:
+            self._log_dialog = TerminalLogDialog(self)
+        return self._log_dialog
+
+    def _append_test_log(self, line: str) -> None:
+        dialog = self._ensure_log_dialog()
+        dialog.append_line(line)
 
     @staticmethod
     def _split_host_port(raw: str, default_port: int) -> Tuple[str, int]:
@@ -1597,7 +1623,13 @@ class SettingsPanel(FancyCard):
         output = (result.stdout or "").strip()
         return (result.returncode == 0), output
 
-    def _perform_connection_test(self, entry: Dict[str, str]) -> Tuple[bool, str]:
+    def _perform_connection_test(
+        self, entry: Dict[str, str], log: Optional[Callable[[str], None]] = None
+    ) -> Tuple[bool, str]:
+        def emit(message: str) -> None:
+            if log is not None:
+                log(message)
+
         method = entry.get("method", "ssh").lower()
         host_text = entry.get("host", "").strip()
         if method == "ssh":
@@ -1611,24 +1643,39 @@ class SettingsPanel(FancyCard):
         host_name, port = self._split_host_port(host_text, default_port)
         if not host_name:
             return False, "호스트 정보를 해석할 수 없습니다."
+        emit(f"호스트 분석 완료 → {host_name}:{port}")
+        emit("ping 검사 시작")
         ping_result, ping_detail = self._ping_host(host_name)
         if ping_result is False:
             detail = ping_detail or "네트워크 응답이 없습니다."
+            emit("ping 실패")
+            if ping_detail:
+                for line in ping_detail.splitlines():
+                    emit(f"PING> {line}")
             return False, f"{host_name}에 ping 응답이 없습니다.\n{detail}"
         notes: List[str] = []
         if ping_result is True:
             notes.append(f"{host_name} ping 응답 확인")
+            emit("ping 성공")
         elif ping_detail:
             notes.append(ping_detail)
+            emit("ping 상세 로그 수신")
+            for line in ping_detail.splitlines():
+                emit(f"PING> {line}")
+        else:
+            emit("ping 명령을 사용할 수 없어 포트 검사로 계속 진행")
         if method == "ssh":
+            emit("SSH 연결 시도 준비")
             if not paramiko:
                 details = "Paramiko 모듈이 설치되어 있지 않아 SSH 연결을 시험할 수 없습니다."
+                emit(details)
                 if notes:
                     details = "\n".join(notes + [details])
                 return False, details
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
+                emit("SSH 세션 생성 및 인증 요청")
                 ssh.connect(
                     hostname=host_name,
                     port=port,
@@ -1639,17 +1686,22 @@ class SettingsPanel(FancyCard):
                 ssh.exec_command("echo connection_test")
                 ssh.close()
                 notes.append(f"{host_name}:{port} SSH 연결에 성공했습니다.")
+                emit("SSH 인증 성공 → 명령 에코 확인 완료")
                 return True, "\n".join(notes)
             except Exception as exc:
                 notes.append(f"{host_name}:{port} SSH 연결 실패: {exc}")
+                emit(f"SSH 예외: {exc}")
                 return False, "\n".join(notes)
         else:
             try:
+                emit(f"소켓 연결 시도 ({host_name}:{port})")
                 with socket.create_connection((host_name, port), timeout=6):
                     notes.append(f"{host_name}:{port} 포트에 접속할 수 있습니다.")
+                    emit("포트 연결 성공")
                     return True, "\n".join(notes)
             except Exception as exc:
                 notes.append(f"{host_name}:{port} 포트 연결 실패: {exc}")
+                emit(f"포트 연결 실패: {exc}")
                 return False, "\n".join(notes)
 
     def _on_test_result(self, success: bool, message: str) -> None:
@@ -1657,8 +1709,12 @@ class SettingsPanel(FancyCard):
         self.test_host_btn.setText("연결 시험")
         if success:
             show_success_message(self, "연결 성공", message)
+            self.log_generated.emit("✔ 최종 결과: 연결 성공")
         else:
             show_warning_message(self, "연결 실패", message)
+            self.log_generated.emit("✖ 최종 결과: 연결 실패")
+        for line in message.splitlines():
+            self.log_generated.emit(f"SUMMARY> {line}")
 
     def _add_host(self) -> None:
         row = self.host_table.rowCount()
@@ -2106,6 +2162,116 @@ class HelpDialog(QtWidgets.QDialog):
         layout.addWidget(close_btn)
         _apply_popup_typography(self)
 
+class TerminalLogDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("연결 시험 로그")
+        self.setModal(False)
+        self.setMinimumSize(640, 420)
+        layout = QtWidgets.QVBoxLayout(self)
+        caption = QtWidgets.QLabel(
+            "실시간 진단 로그입니다. 테스트가 완료될 때까지 창을 열어두세요."
+        )
+        caption.setWordWrap(True)
+        caption.setProperty("popup-role", "body")
+        layout.addWidget(caption)
+        self.output = QtWidgets.QPlainTextEdit()
+        self.output.setReadOnly(True)
+        font = QtGui.QFont("Cascadia Code", 12)
+        self.output.setFont(font)
+        self.output.setStyleSheet(
+            "background-color: #071425; color: #6CFFB8; border-radius: 12px; padding: 12px;"
+        )
+        layout.addWidget(self.output, 1)
+        self.close_btn = QtWidgets.QPushButton("닫기")
+        self.close_btn.clicked.connect(self.hide)
+        layout.addWidget(self.close_btn, 0, Qt.AlignRight)
+        _apply_popup_typography(self)
+
+    def start_session(self, target: str) -> None:
+        self.output.clear()
+        self.append_line(f"▶ {datetime.now():%H:%M:%S} - {target} 연결 시험을 시작합니다")
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def append_line(self, text: str) -> None:
+        self.output.appendPlainText(text)
+        self.output.moveCursor(QtGui.QTextCursor.End)
+
+
+class CreditsDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("제작 정보")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        layout = QtWidgets.QVBoxLayout(self)
+        title = QtWidgets.QLabel(f"<b>{APP_NAME}</b> 제작 크레딧")
+        title.setAlignment(Qt.AlignCenter)
+        title.setProperty("popup-role", "body")
+        layout.addWidget(title)
+        grid = QtWidgets.QFormLayout()
+        grid.setLabelAlignment(Qt.AlignRight)
+        grid.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        grid.setVerticalSpacing(8)
+        grid.addRow("버전", QtWidgets.QLabel(APP_VERSION))
+        grid.addRow("제작자", QtWidgets.QLabel(AUTHOR_NAME))
+        grid.addRow("제작 날짜", QtWidgets.QLabel(BUILD_DATE))
+        grid.addRow("저작권", QtWidgets.QLabel("© 2025 Zolt46 / PSW / Emanon108. All rights reserved."))
+        grid.addRow("문의", QtWidgets.QLabel("다산정보관 참고자료실 데스크"))
+        grid_widget = QtWidgets.QWidget()
+        grid_widget.setLayout(grid)
+        layout.addWidget(grid_widget)
+        note = QtWidgets.QLabel(
+            "• 고급 설정 → 상단 로고에서 원하는 이미지를 선택하면 상단 중앙 로고가 교체됩니다.\n"
+            "• 로고를 더블 클릭하면 ??"
+        )
+        note.setWordWrap(True)
+        note.setProperty("popup-role", "body")
+        layout.addWidget(note)
+        close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close_btn.rejected.connect(self.reject)
+        close_btn.accepted.connect(self.accept)
+        layout.addWidget(close_btn)
+        _apply_popup_typography(self)
+
+
+class EasterEggDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AutoClose Secret Studio")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        layout = QtWidgets.QVBoxLayout(self)
+        label = QtWidgets.QLabel(
+            "<pre style='color:#3BFFB6; font-family: "
+            "Cascadia Code, Consolas, monospace; font-size: 13px;'>\n"
+            "   █████╗ ██╗   ██╗████████╗ ██████╗  ██████╗██╗      ██████╗ ███████╗\n"
+            "  ██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗██╔════╝██║     ██╔═══██╗██╔════╝\n"
+            "  ███████║██║   ██║   ██║   ██║   ██║██║     ██║     ██║   ██║█████╗  \n"
+            "  ██╔══██║██║   ██║   ██║   ██║   ██║██║     ██║     ██║   ██║██╔══╝  \n"
+            "  ██║  ██║╚██████╔╝   ██║   ╚██████╔╝╚██████╗███████╗╚██████╔╝██║     \n"
+            "  ╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝  ╚═════╝╚══════╝ ╚═════╝ ╚═╝     \n"
+            "</pre>"
+        )
+        label.setAlignment(Qt.AlignCenter)
+        label.setTextFormat(Qt.RichText)
+        layout.addWidget(label)
+        message = QtWidgets.QLabel(
+            "숨은 공방을 찾아내셨군요!\n"
+            "마감이 귀찮은 당신을 위한,\n 자동화 작업은 언제나 \n AutoClose가 든든하게 함께합니다."
+        )
+        message.setAlignment(Qt.AlignCenter)
+        message.setWordWrap(True)
+        message.setProperty("popup-role", "body")
+        layout.addWidget(message)
+        close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close_btn.rejected.connect(self.reject)
+        close_btn.accepted.connect(self.accept)
+        layout.addWidget(close_btn)
+        _apply_popup_typography(self)
+
 
 class DashboardCard(FancyCard):
     request_force_run = Signal()
@@ -2532,10 +2698,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
         self.logo_label.setFixedHeight(46)
+        self.logo_label.setCursor(Qt.PointingHandCursor)
         logo_layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
         logo_layout.addStretch(1)
         top_layout.addWidget(self.logo_container, 1)
         top_layout.addStretch(1)
+        self.info_button = QtWidgets.QPushButton("제작 정보")
+        self.info_button.setCursor(Qt.PointingHandCursor)
+        self.info_button.setToolTip("프로그램 제작자와 버전 정보를 확인합니다.")
+        top_layout.addWidget(self.info_button, 0)
         self.help_button = QtWidgets.QPushButton("도움말")
         self.help_button.setObjectName("HelpButton")
         self.help_button.setCursor(Qt.PointingHandCursor)
@@ -2664,6 +2835,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_card.update_logs(self.cfg_mgr.config.shutdown_logs)
         self._create_tray()
         self.page_title.installEventFilter(self)
+        self.logo_label.installEventFilter(self)
         self.set_mode("user")
 
     def _wrap_scroll(self, content: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
@@ -2792,6 +2964,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg_mgr.config_changed.connect(self._on_config_changed)
         for card in self.day_cards.values():
             card.changed.connect(self._on_day_card_changed)
+        self.info_button.clicked.connect(self._show_credits_dialog)
 
     def _apply_theme(self, accent: str) -> None:
         self._build_palette()
@@ -2804,6 +2977,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tray.setIcon(icon)
         for card in self._cards:
             card.set_accent(accent)
+
+    def _show_credits_dialog(self) -> None:
+        dialog = CreditsDialog(self)
+        dialog.exec()
+
 
     def _on_config_changed(self, cfg: SchedulerConfig) -> None:
         self.audio_service.set_volume(cfg.audio_volume)
@@ -2865,6 +3043,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._secret_clicks >= 5:
                     self._secret_clicks = 0
                     self.admin_login_requested.emit()
+        if obj is self.logo_label and event.type() == QtCore.QEvent.MouseButtonDblClick:
+            if isinstance(event, QtGui.QMouseEvent) and event.button() == Qt.LeftButton:
+                EasterEggDialog(self).exec()
+                return True
         return super().eventFilter(obj, event)
 
     def _handle_tray_show(self) -> None:
