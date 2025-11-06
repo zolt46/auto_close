@@ -24,6 +24,7 @@ import atexit
 import hashlib
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -41,7 +42,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon, QPalette, QColor
+from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
@@ -166,6 +167,7 @@ class SchedulerConfig:
     holiday_labels: Dict[str, str] = field(default_factory=dict)
     start_with_os: bool = False
     theme_accent: str = "#2A5CAA"
+    audio_volume: float = 0.9
     shutdown_logs: List[Dict[str, str]] = field(default_factory=list)
     user_password_hash: str = field(default_factory=lambda: hash_password(DEFAULT_USER_PASSWORD))
     admin_password_hash: str = field(default_factory=lambda: hash_password(DEFAULT_ADMIN_PASSWORD))
@@ -196,6 +198,7 @@ class SchedulerConfig:
             "holiday_labels",
             "start_with_os",
             "theme_accent",
+            "audio_volume",
             "shutdown_logs",
             "user_password_hash",
             "admin_password_hash",
@@ -214,6 +217,11 @@ class SchedulerConfig:
             base.user_password_hash = hash_password(DEFAULT_USER_PASSWORD)
         if not isinstance(base.admin_password_hash, str) or not base.admin_password_hash:
             base.admin_password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        try:
+            base.audio_volume = float(base.audio_volume)
+        except (TypeError, ValueError):
+            base.audio_volume = 0.9
+        base.audio_volume = max(0.0, min(1.0, base.audio_volume))
         return base
 
 def is_holiday(cfg: SchedulerConfig, target: date) -> bool:
@@ -446,6 +454,16 @@ class AudioService(QtCore.QObject):
         self.player.mediaStatusChanged.connect(self._status_changed)
         self.player.playbackStateChanged.connect(self._playback_changed)
         self._current: Optional[str] = None
+        self._volume: float = 0.9
+        self.audio_output.setVolume(self._volume)
+
+    def set_volume(self, value: float) -> None:
+        try:
+            volume = float(value)
+        except (TypeError, ValueError):
+            volume = 0.9
+        self._volume = max(0.0, min(1.0, volume))
+        self.audio_output.setVolume(self._volume)
 
     def play(self, path: str) -> None:
         if not path:
@@ -453,7 +471,7 @@ class AudioService(QtCore.QObject):
             return
         url = QtCore.QUrl.fromLocalFile(path)
         self.player.setSource(url)
-        self.audio_output.setVolume(0.9)
+        self.audio_output.setVolume(self._volume)
         self._current = path
         self.player.play()
         self.playback_started.emit(path)
@@ -755,6 +773,20 @@ class PlaylistPanel(FancyCard):
         btn_row.addWidget(up_btn)
         btn_row.addWidget(down_btn)
         layout.addLayout(btn_row)
+        volume_row = QtWidgets.QHBoxLayout()
+        volume_label = QtWidgets.QLabel("재생 볼륨")
+        volume_label.setProperty("role", "subtitle")
+        self.volume_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setPageStep(5)
+        self.volume_slider.setSingleStep(1)
+        self.volume_slider.setCursor(Qt.PointingHandCursor)
+        self.volume_value = QtWidgets.QLabel()
+        self.volume_value.setFixedWidth(60)
+        volume_row.addWidget(volume_label)
+        volume_row.addWidget(self.volume_slider, 1)
+        volume_row.addWidget(self.volume_value, 0)
+        layout.addLayout(volume_row)
         container = QtWidgets.QWidget()
         container.setLayout(layout)
         self.body_layout.addWidget(container)
@@ -764,6 +796,11 @@ class PlaylistPanel(FancyCard):
         down_btn.clicked.connect(lambda: self._move_selected(1))
         preview_btn.clicked.connect(self._preview_selected)
         stop_btn.clicked.connect(self._emit_stop_preview)
+        self._volume_timer = QtCore.QTimer(self)
+        self._volume_timer.setSingleShot(True)
+        self._volume_timer.setInterval(300)
+        self._volume_timer.timeout.connect(self._persist_volume)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
         self.refresh()
 
     def refresh(self) -> None:
@@ -773,6 +810,7 @@ class PlaylistPanel(FancyCard):
             item.setData(Qt.UserRole, path)
             item.setToolTip(path)
             self.list_widget.addItem(item)
+        self._sync_volume()
 
     def _add_files(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "음성 파일 추가", str(Path.home()), "Audio Files (*.mp3 *.wav *.ogg)")
@@ -844,6 +882,26 @@ class PlaylistPanel(FancyCard):
             signal.emit()
         for callback in list(self._stop_preview_listeners):
             callback()
+
+    def _on_volume_changed(self, value: int) -> None:
+        self.volume_value.setText(f"{value}%")
+        self._volume_timer.start()
+
+    def _persist_volume(self) -> None:
+        value = max(0, min(100, self.volume_slider.value())) / 100
+
+        def updater(cfg: SchedulerConfig) -> None:
+            cfg.audio_volume = value
+
+        self.cfg_mgr.update(updater)
+
+    def _sync_volume(self) -> None:
+        target = int(round(self.cfg_mgr.config.audio_volume * 100))
+        target = max(0, min(100, target))
+        block = self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(target)
+        self.volume_slider.blockSignals(block)
+        self.volume_value.setText(f"{target}%")
 
 class AutoAssignmentPreviewCard(FancyCard):
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
@@ -1205,6 +1263,8 @@ class HolidayPanel(FancyCard):
 
 
 class SettingsPanel(FancyCard):
+    test_completed = Signal(bool, str)
+
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
         super().__init__("고급 설정", accent, parent)
         self.cfg_mgr = cfg_mgr
@@ -1272,10 +1332,13 @@ class SettingsPanel(FancyCard):
         host_btn_row = QtWidgets.QHBoxLayout()
         self.add_host_btn = QtWidgets.QPushButton("추가")
         self.remove_host_btn = QtWidgets.QPushButton("삭제")
+        self.test_host_btn = QtWidgets.QPushButton("연결 시험")
         for btn in (self.add_host_btn, self.remove_host_btn):
             btn.setCursor(Qt.PointingHandCursor)
+        self.test_host_btn.setCursor(Qt.PointingHandCursor)
         host_btn_row.addWidget(self.add_host_btn)
         host_btn_row.addWidget(self.remove_host_btn)
+        host_btn_row.addWidget(self.test_host_btn)
         host_btn_row.addStretch(1)
         hosts_layout.addLayout(host_btn_row)
         outer.addWidget(hosts_group)
@@ -1290,11 +1353,13 @@ class SettingsPanel(FancyCard):
         self.accent_btn.clicked.connect(self._pick_color)
         self.add_host_btn.clicked.connect(self._add_host)
         self.remove_host_btn.clicked.connect(self._remove_host)
+        self.test_host_btn.clicked.connect(self._test_host)
         self.host_table.itemChanged.connect(lambda _: self._persist_hosts())
         path_change_btn.clicked.connect(self._choose_config_dir)
         self.cfg_mgr.storage_dir_changed.connect(self._on_storage_dir_changed)
         self.user_password_btn.clicked.connect(self._change_user_password)
         self.admin_password_btn.clicked.connect(self._change_admin_password)
+        self.test_completed.connect(self._on_test_result)
         self._targets_timer = QtCore.QTimer(self)
         self._targets_timer.setSingleShot(True)
         self._targets_timer.setInterval(400)
@@ -1380,6 +1445,102 @@ class SettingsPanel(FancyCard):
             hosts.append(host_entry)
         self.cfg_mgr.update(lambda cfg: setattr(cfg, "remote_hosts", hosts))
 
+    def _test_host(self) -> None:
+        row = self.host_table.currentRow()
+        if row < 0:
+            QtWidgets.QMessageBox.information(self, "안내", "시험할 원격 PC 행을 선택하세요.")
+            return
+        entry = {
+            "host": self._table_text(row, 0),
+            "username": self._table_text(row, 1) or "",
+            "password": self._table_text(row, 2) or "",
+            "method": (self._table_text(row, 3) or "ssh").lower(),
+        }
+        host = entry["host"].strip()
+        if not host:
+            QtWidgets.QMessageBox.warning(self, "오류", "대상 호스트를 먼저 입력하세요.")
+            return
+        self.test_host_btn.setEnabled(False)
+        self.test_host_btn.setText("시험 중…")
+
+        def worker(payload: Dict[str, str]) -> None:
+            try:
+                success, message = self._perform_connection_test(payload)
+            except Exception as exc:  # pragma: no cover - 네트워크 예외 보호
+                success, message = False, f"예상치 못한 오류: {exc}"
+            self.test_completed.emit(success, message)
+
+        threading.Thread(target=worker, args=(entry,), daemon=True).start()
+
+    @staticmethod
+    def _split_host_port(raw: str, default_port: int) -> Tuple[str, int]:
+        target = raw.strip()
+        if not target:
+            return "", default_port
+        if "://" in target:
+            target = target.split("://", 1)[1]
+        if target.startswith("[") and "]" in target:
+            host_part, _, remainder = target.partition("]")
+            host = host_part.strip("[]")
+            if remainder.startswith(":"):
+                try:
+                    return host, int(remainder[1:])
+                except ValueError:
+                    return host, default_port
+            return host, default_port
+        if target.count(":") == 1:
+            name, port_str = target.split(":", 1)
+            if port_str.isdigit():
+                return name, int(port_str)
+        return target, default_port
+
+    def _perform_connection_test(self, entry: Dict[str, str]) -> Tuple[bool, str]:
+        method = entry.get("method", "ssh").lower()
+        host_text = entry.get("host", "").strip()
+        if method == "ssh":
+            default_port = 22
+        elif method in {"winrm", "winrm-http"}:
+            default_port = 5985
+        elif method in {"winrm-https"}:
+            default_port = 5986
+        else:
+            default_port = 22
+        host_name, port = self._split_host_port(host_text, default_port)
+        if not host_name:
+            return False, "호스트 정보를 해석할 수 없습니다."
+        if method == "ssh":
+            if not paramiko:
+                return False, "Paramiko 모듈이 설치되어 있지 않아 SSH 연결을 시험할 수 없습니다."
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                ssh.connect(
+                    hostname=host_name,
+                    port=port,
+                    username=entry.get("username") or None,
+                    password=entry.get("password") or None,
+                    timeout=8,
+                )
+                ssh.exec_command("echo connection_test")
+                ssh.close()
+                return True, f"{host_name}:{port} SSH 연결에 성공했습니다."
+            except Exception as exc:
+                return False, f"{host_name}:{port} SSH 연결 실패: {exc}"
+        else:
+            try:
+                with socket.create_connection((host_name, port), timeout=6):
+                    return True, f"{host_name}:{port} 포트에 접속할 수 있습니다."
+            except Exception as exc:
+                return False, f"{host_name}:{port} 포트 연결 실패: {exc}"
+
+    def _on_test_result(self, success: bool, message: str) -> None:
+        self.test_host_btn.setEnabled(True)
+        self.test_host_btn.setText("연결 시험")
+        if success:
+            QtWidgets.QMessageBox.information(self, "연결 성공", message)
+        else:
+            QtWidgets.QMessageBox.warning(self, "연결 실패", message)
+
     def _add_host(self) -> None:
         row = self.host_table.rowCount()
         self.host_table.insertRow(row)
@@ -1447,18 +1608,25 @@ class DateRangeDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("기간 선택")
+        self.setModal(True)
+        self.setMinimumWidth(600)
         layout = QtWidgets.QVBoxLayout(self)
         self.start_calendar = QtWidgets.QCalendarWidget()
         self.end_calendar = QtWidgets.QCalendarWidget()
-        layout.addWidget(QtWidgets.QLabel("시작일"))
+        start_label = QtWidgets.QLabel("시작일")
+        start_label.setProperty("popup-role", "body")
+        layout.addWidget(start_label)
         layout.addWidget(self.start_calendar)
-        layout.addWidget(QtWidgets.QLabel("종료일"))
+        end_label = QtWidgets.QLabel("종료일")
+        end_label.setProperty("popup-role", "body")
+        layout.addWidget(end_label)
         layout.addWidget(self.end_calendar)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         layout.addWidget(buttons)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.result_range = ("", "")
+        _apply_popup_typography(self)
 
     def accept(self) -> None:
         start = self.start_calendar.selectedDate().toPython()
@@ -1474,6 +1642,7 @@ class PasswordChangeDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
+        self.setMinimumWidth(520)
         form = QtWidgets.QFormLayout(self)
         form.setSpacing(12)
         self._require_current = require_current
@@ -1493,7 +1662,7 @@ class PasswordChangeDialog(QtWidgets.QDialog):
         self.confirm_edit.setPlaceholderText("새 비밀번호 확인")
         form.addRow("비밀번호 확인", self.confirm_edit)
         self.error_label = QtWidgets.QLabel()
-        self.error_label.setStyleSheet("color: #C62828;")
+        self.error_label.setProperty("popup-role", "error")
         form.addRow("", self.error_label)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._try_accept)
@@ -1501,6 +1670,14 @@ class PasswordChangeDialog(QtWidgets.QDialog):
         form.addRow(buttons)
         self.new_password: str = ""
         self.current_password: str = ""
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QtWidgets.QFormLayout.LabelRole)
+            if item is None:
+                continue
+            widget = item.widget()
+            if isinstance(widget, QtWidgets.QLabel):
+                widget.setProperty("popup-role", "body")
+        _apply_popup_typography(self)
 
     def _try_accept(self) -> None:
         new_value = self.new_edit.text().strip()
@@ -1528,41 +1705,85 @@ class PasswordChangeDialog(QtWidgets.QDialog):
         self.accept()
 
 def _apply_popup_typography(dialog: QtWidgets.QDialog) -> None:
+    font_family = "Noto Sans KR"
+    text_color = QColor("#0F172A")
+    hint_color = QColor("#26364A")
+    error_color = QColor("#D32F2F")
+    accent_color = "#2A5CAA"
+    disabled_accent = "#B0C6F0"
+    body_font = QFont(font_family, 18)
+    body_font.setWeight(QFont.DemiBold)
+    hint_font = QFont(font_family, 17)
+    hint_font.setWeight(QFont.Medium)
+    error_font = QFont(font_family, 15)
+    error_font.setWeight(QFont.DemiBold)
+    input_font = QFont(font_family, 17)
+    button_font = QFont(font_family, 17)
+    button_font.setWeight(QFont.Bold)
     dialog.setStyleSheet(
-        """
-        QLabel[popup-role="body"] {
-            font-size: 16px;
-            font-weight: 600;
-            color: #1B1F24;
-            font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
-            line-height: 1.45;
-        }
-        QLabel[popup-role="hint"] {
-            font-size: 16px;
-            font-weight: 500;
-            color: #1B1F24;
-            font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
-            line-height: 1.6;
-        }
-        QLabel[popup-role="error"] {
-            font-size: 14px;
-            font-weight: 600;
-            color: #C62828;
-            font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
-        }
-        QLineEdit {
-            font-size: 16px;
-            padding: 8px 10px;
-            border-radius: 6px;
-        }
-        QDialogButtonBox QPushButton {
-            font-size: 15px;
-            font-weight: 600;
-            min-height: 32px;
-            padding: 4px 14px;
-        }
+        f"""
+        QDialog {{
+            background-color: #F8FAFF;
+        }}
+        QDialog QLineEdit {{
+            font-size: 17px;
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 2px solid #9FB4D9;
+            background: #FFFFFF;
+            color: {text_color.name()};
+        }}
+        QDialog QLineEdit:focus {{
+            border-color: {accent_color};
+        }}
+        QDialog QPushButton {{
+            background-color: {accent_color};
+            border: none;
+            color: #FFFFFF;
+            font-size: 17px;
+            font-weight: 700;
+            padding: 8px 22px;
+            border-radius: 12px;
+        }}
+        QDialog QPushButton:hover {{
+            background-color: #386AD6;
+        }}
+        QDialog QPushButton:disabled {{
+            background-color: {disabled_accent};
+            color: rgba(255, 255, 255, 0.85);
+        }}
         """
     )
+    layout = dialog.layout()
+    if isinstance(layout, (QtWidgets.QVBoxLayout, QtWidgets.QFormLayout)):
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(18)
+        if isinstance(layout, QtWidgets.QFormLayout):
+            layout.setHorizontalSpacing(24)
+            layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    for label in dialog.findChildren(QtWidgets.QLabel):
+        role = label.property("popup-role")
+        palette = label.palette()
+        if role == "hint":
+            label.setFont(hint_font)
+            palette.setColor(QPalette.WindowText, hint_color)
+        elif role == "error":
+            label.setFont(error_font)
+            palette.setColor(QPalette.WindowText, error_color)
+        else:
+            label.setFont(body_font)
+            palette.setColor(QPalette.WindowText, text_color)
+        label.setPalette(palette)
+    for edit in dialog.findChildren(QtWidgets.QLineEdit):
+        edit.setFont(input_font)
+        palette = edit.palette()
+        palette.setColor(QPalette.Text, text_color)
+        palette.setColor(QPalette.PlaceholderText, hint_color)
+        edit.setPalette(palette)
+    for button in dialog.findChildren(QtWidgets.QPushButton):
+        button.setFont(button_font)
+        button.setMinimumHeight(42)
+        button.setCursor(Qt.PointingHandCursor)
 
 
 class PasswordPrompt(QtWidgets.QDialog):
@@ -1570,7 +1791,7 @@ class PasswordPrompt(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(520)
         self.validator = validator
         layout = QtWidgets.QVBoxLayout(self)
         message = QtWidgets.QLabel(prompt)
@@ -1610,10 +1831,10 @@ class HelpDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(560)
         layout = QtWidgets.QVBoxLayout(self)
         label = QtWidgets.QLabel("\n".join(lines))
-        label.setProperty("popup-role", "hint")
+        label.setProperty("popup-role", "body")
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(label)
@@ -1838,6 +2059,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg_mgr = cfg_mgr
         self.scheduler = SchedulerEngine(cfg_mgr)
         self.audio_service = AudioService()
+        self.audio_service.set_volume(self.cfg_mgr.config.audio_volume)
         self.overlay = StatusOverlay()
         self._pending_follow_up: Optional[Tuple[bool, bool]] = None
         self._playback_mode: str = "idle"
@@ -2284,6 +2506,7 @@ class MainWindow(QtWidgets.QMainWindow):
             card.set_accent(accent)
 
     def _on_config_changed(self, cfg: SchedulerConfig) -> None:
+        self.audio_service.set_volume(cfg.audio_volume)
         self._apply_theme(cfg.theme_accent)
         self.playlist_panel.refresh()
         self.assignment_preview.refresh()
