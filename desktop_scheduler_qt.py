@@ -53,6 +53,8 @@ APP_NAME = "AutoClose Studio"
 APP_VERSION = "2.1.2"
 BUILD_DATE = "2025-11-06"
 AUTHOR_NAME = "Zolt46 / PSW / Emanon108"
+ORGANIZATION_NAME = "AutoClose Studio"
+ORGANIZATION_DOMAIN = "autoclose.local"
 DEFAULT_USER_PASSWORD = "0000"
 DEFAULT_ADMIN_PASSWORD = "000000"
 
@@ -361,13 +363,34 @@ class ConfigManager(QtCore.QObject):
 
     def _load(self) -> SchedulerConfig:
         config_file = self.locator.config_file
+        raw_data: Optional[Dict[str, object]] = None
         if config_file.exists():
             try:
-                data = json.loads(config_file.read_text(encoding="utf-8"))
-                return SchedulerConfig.from_dict(data)
+                raw_data = json.loads(config_file.read_text(encoding="utf-8"))
+                config = SchedulerConfig.from_dict(raw_data)
+                if self._apply_migrations(config, raw_data):
+                    try:
+                        self._write(config)
+                    except Exception as exc:  # pragma: no cover - non critical
+                        print("[설정 마이그레이션 실패]", exc)
+                return config
             except Exception as exc:  # pragma: no cover - fall back to default
                 print("[설정 읽기 실패]", exc)
-        return SchedulerConfig()
+        config = SchedulerConfig()
+        if self._apply_migrations(config, raw_data):
+            try:
+                self._write(config)
+            except Exception as exc:  # pragma: no cover - non critical
+                print("[기본 설정 저장 실패]", exc)
+        return config
+
+    def _apply_migrations(self, config: SchedulerConfig, data: Optional[Dict[str, object]]) -> bool:
+        changed = False
+        if data is None or "auto_skip_weekends" not in data:
+            if config.auto_skip_weekends is not True:
+                config.auto_skip_weekends = True
+                changed = True
+        return changed
 
     def _write(self, config: SchedulerConfig) -> None:
         config_file = self.locator.config_file
@@ -3236,6 +3259,10 @@ class MainWindow(QtWidgets.QMainWindow):
 class App(QtWidgets.QApplication):
     def __init__(self, argv: List[str]) -> None:
         super().__init__(argv)
+        QtCore.QCoreApplication.setApplicationName(APP_NAME)
+        QtCore.QCoreApplication.setApplicationVersion(APP_VERSION)
+        QtCore.QCoreApplication.setOrganizationName(ORGANIZATION_NAME)
+        QtCore.QCoreApplication.setOrganizationDomain(ORGANIZATION_DOMAIN)
         self.setQuitOnLastWindowClosed(False)
         self.cfg_mgr = ConfigManager()
         icon = create_tray_icon(self.cfg_mgr.config.theme_accent)
