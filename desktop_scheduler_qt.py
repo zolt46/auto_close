@@ -555,75 +555,40 @@ def set_startup(start_with_os: bool) -> None:
             except FileNotFoundError:
                 pass
 
-class AnimatedToggle(QtWidgets.QCheckBox):
+class StyledToggle(QtWidgets.QCheckBox):
+    """애니메이션 없이도 고대비 토글 모양을 제공하는 체크박스."""
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
         self.setTristate(False)
-        self._offset = 1.0 if self.isChecked() else 0.0
-        self._animation = QtCore.QPropertyAnimation(self, b"offset", self)
-        self._animation.setDuration(220)
-        self._animation.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        self.toggled.connect(self._animate)
-        self.setFixedSize(64, 34)
         self.setFocusPolicy(Qt.StrongFocus)
-
-    def sizeHint(self) -> QtCore.QSize:  # pragma: no cover - Qt sizing
-        return QtCore.QSize(64, 34)
-
-    def hitButton(self, pos: QtCore.QPoint) -> bool:  # pragma: no cover - Qt event
-        rect = self.rect().adjusted(-6, -4, 6, 4)
-        return rect.contains(pos)
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # pragma: no cover - Qt paint
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        track_rect = QtCore.QRectF(7, 9, self.width() - 14, 16)
-        radius = track_rect.height() / 2
-        off_color = QtGui.QColor("#C4D4F4")
-        on_color = QtGui.QColor("#3B6FD6")
-        glow_color = QtGui.QColor("#AEC4FF")
-        glow_color.setAlphaF(0.35)
-        painter.setPen(Qt.NoPen)
-        blend = off_color
-        if self._offset > 0:
-            blend = QtGui.QColor(
-                off_color.red() + (on_color.red() - off_color.red()) * self._offset,
-                off_color.green() + (on_color.green() - off_color.green()) * self._offset,
-                off_color.blue() + (on_color.blue() - off_color.blue()) * self._offset,
-            )
-        painter.setBrush(blend)
-        painter.drawRoundedRect(track_rect, radius, radius)
-        knob_diameter = 22
-        travel = track_rect.width() - knob_diameter
-        knob_x = track_rect.left() + self._offset * max(travel, 1)
-        knob_rect = QtCore.QRectF(knob_x, (self.height() - knob_diameter) / 2, knob_diameter, knob_diameter)
-        painter.setBrush(Qt.white)
-        painter.drawEllipse(knob_rect)
-        if self._offset > 0:
-            glow_rect = knob_rect.adjusted(-3, -3, 3, 3)
-            painter.setBrush(glow_color)
-            painter.drawEllipse(glow_rect)
-        painter.end()
-
-    def _animate(self, checked: bool) -> None:
-        self._animation.stop()
-        self._animation.setStartValue(self._offset)
-        self._animation.setEndValue(1.0 if checked else 0.0)
-        if self.isVisible():
-            self._animation.start()
-        else:
-            self._offset = 1.0 if checked else 0.0
-            self.update()
-
-    def get_offset(self) -> float:
-        return self._offset
-
-    def set_offset(self, value: float) -> None:
-        self._offset = max(0.0, min(1.0, value))
-        self.update()
-
-    offset = QtCore.Property(float, fget=get_offset, fset=set_offset)
+        self.setFixedHeight(30)
+        self.setStyleSheet(
+            """
+            QCheckBox {
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 50px;
+                height: 26px;
+                border-radius: 13px;
+                border: 2px solid #90A4C5;
+                background-color: #E3EAF6;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #3461C1;
+                border-color: #244B9A;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #E3EAF6;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #C7CFDD;
+                border-color: #A5B1C8;
+            }
+            """
+        )
 
 
 def create_toggle_field(text: str, toggle: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
@@ -647,11 +612,6 @@ class FancyCard(QtWidgets.QFrame):
         self.setObjectName("FancyCard")
         self._accent = accent
         self.setAttribute(Qt.WA_StyledBackground, True)
-        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 10)
-        shadow.setColor(QtGui.QColor(28, 54, 119, 40))
-        self.setGraphicsEffect(shadow)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -718,9 +678,9 @@ class DayCard(FancyCard):
         layout = QtWidgets.QGridLayout()
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(10)
-        enable_chk = AnimatedToggle()
+        enable_chk = StyledToggle()
         enable_chk.setToolTip("이 요일의 일정을 활성화하거나 비활성화합니다.")
-        auto_chk = AnimatedToggle()
+        auto_chk = StyledToggle()
         time_edit = QtWidgets.QTimeEdit()
         time_edit.setDisplayFormat("HH:mm")
         manual_combo = QtWidgets.QComboBox()
@@ -729,8 +689,8 @@ class DayCard(FancyCard):
         manual_combo.setEditable(False)
         manual_combo.addItem("선택 안 함", None)
         manual_combo.setCurrentIndex(0)
-        remote_chk = AnimatedToggle()
-        local_chk = AnimatedToggle()
+        remote_chk = StyledToggle()
+        local_chk = StyledToggle()
         auto_hint = QtWidgets.QLabel()
         auto_hint.setProperty("role", "subtitle")
         auto_hint.setWordWrap(True)
@@ -1081,9 +1041,9 @@ class HolidayPanel(FancyCard):
         self.set_subtitle("지정된 날짜에는 스케줄이 실행되지 않습니다")
         layout = QtWidgets.QVBoxLayout()
         layout.setSpacing(10)
-        toggle = AnimatedToggle()
+        toggle = StyledToggle()
         toggle.setToolTip("휴일에 등록된 날짜에는 일정이 실행되지 않습니다.")
-        weekend_toggle = AnimatedToggle()
+        weekend_toggle = StyledToggle()
         weekend_toggle.setToolTip("토요일과 일요일을 자동으로 휴일로 처리합니다.")
         layout.addWidget(create_toggle_field("휴일 기능 사용", toggle))
         layout.addWidget(create_toggle_field("주말(토·일) 자동 제외", weekend_toggle))
@@ -1375,13 +1335,13 @@ class SettingsPanel(FancyCard):
         form = QtWidgets.QFormLayout()
         form.setSpacing(12)
         self.target_edit = QtWidgets.QLineEdit(", ".join(cfg_mgr.config.targets))
-        self.remote_toggle = AnimatedToggle()
+        self.remote_toggle = StyledToggle()
         self.remote_toggle.setChecked(cfg_mgr.config.enable_remote_shutdown)
         self.remote_toggle.setToolTip("스케줄 종료 후 원격 PC 종료 명령을 전송합니다.")
-        self.local_toggle = AnimatedToggle()
+        self.local_toggle = StyledToggle()
         self.local_toggle.setChecked(cfg_mgr.config.enable_local_shutdown)
         self.local_toggle.setToolTip("스케줄 종료 후 이 PC를 종료합니다.")
-        self.startup_toggle = AnimatedToggle()
+        self.startup_toggle = StyledToggle()
         self.startup_toggle.setChecked(cfg_mgr.config.start_with_os)
         self.startup_toggle.setToolTip("Windows 로그인 시 프로그램을 자동 실행합니다.")
         self.delay_spin = QtWidgets.QSpinBox()
@@ -2591,12 +2551,6 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.addWidget(self.lock_button, 0)
         content_layout.addWidget(top_bar, 0)
         self.content_stack = QtWidgets.QStackedWidget()
-        self._stack_effect = QtWidgets.QGraphicsOpacityEffect(self.content_stack)
-        self.content_stack.setGraphicsEffect(self._stack_effect)
-        self._stack_effect.setOpacity(1.0)
-        self._page_anim = QtCore.QPropertyAnimation(self._stack_effect, b"opacity", self)
-        self._page_anim.setDuration(260)
-        self._page_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         content_layout.addWidget(self.content_stack, 1)
 
         root_layout.addWidget(self.drawer)
@@ -2686,12 +2640,7 @@ class MainWindow(QtWidgets.QMainWindow):
             drawer_layout.addWidget(btn)
 
         drawer_layout.addStretch(1)
-        self._drawer_anim = QtCore.QPropertyAnimation(self.drawer, b"maximumWidth", self)
-        self._drawer_anim.setDuration(240)
-        self._drawer_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
-        self._drawer_anim.finished.connect(self._on_drawer_animation_finished)
-        self._drawer_target_width = 0
-        self.drawer.setMaximumWidth(0)
+        self.drawer.setMaximumWidth(self.drawer_width)
         self.drawer.hide()
         self.menu_button.clicked.connect(self._toggle_drawer)
         self.log_card.clear_requested.connect(self._clear_logs)
@@ -2726,26 +2675,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return scroll
 
     def _toggle_drawer(self) -> None:
-        opening = not self.drawer.isVisible()
-        self._drawer_anim.stop()
-        if opening:
+        if self.drawer.isVisible():
+            self.drawer.hide()
+        else:
             self.drawer.show()
             self.drawer.raise_()
-            self.drawer.setMaximumWidth(0)
-            self._drawer_anim.setStartValue(0)
-            self._drawer_target_width = self.drawer_width
-            self._drawer_anim.setEndValue(self.drawer_width)
-        else:
-            current = max(1, self.drawer.width())
-            self._drawer_anim.setStartValue(current)
-            self._drawer_target_width = 0
-            self._drawer_anim.setEndValue(0)
-        self._drawer_anim.start()
-
-    def _on_drawer_animation_finished(self) -> None:
-        if self._drawer_target_width == 0:
-            self.drawer.hide()
-        self.drawer.setMaximumWidth(self.drawer_width)
 
     def set_locked(self, locked: bool) -> None:
         self._locked = locked
@@ -2785,18 +2719,12 @@ class MainWindow(QtWidgets.QMainWindow):
         current = self.content_stack.currentIndex()
         if current != index:
             self.content_stack.setCurrentIndex(index)
-            self._page_anim.stop()
-            self._stack_effect.setOpacity(0.0)
-            self._page_anim.setStartValue(0.0)
-            self._page_anim.setEndValue(1.0)
-            self._page_anim.start()
         self.page_title.setText(name)
         button = self._nav_buttons.get(name)
         if button and not button.isChecked():
             button.setChecked(True)
         if self.drawer.isVisible():
-            if self._drawer_target_width != 0 or self._drawer_anim.state() != QtCore.QAbstractAnimation.Running:
-                self._toggle_drawer()
+            self.drawer.hide()
 
     def _preview_audio_for_today(self) -> Optional[str]:
         cfg = self.cfg_mgr.config
