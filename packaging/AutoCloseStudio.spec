@@ -14,8 +14,7 @@ from pathlib import Path
 import PySide6
 
 block_cipher = None
-
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(r"C:\Users\seewo\Desktop\closing_new_proj")
 ASSET_DIR = ROOT / "assets"
 PYSIDE_PLUGINS = Path(PySide6.__file__).resolve().parent / "plugins"
 
