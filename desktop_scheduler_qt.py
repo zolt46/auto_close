@@ -2015,19 +2015,22 @@ def _apply_popup_typography(dialog: QtWidgets.QDialog) -> None:
     accent_color = "#2A5CAA"
     disabled_accent = "#B0C6F0"
     font_stack = ", ".join(f"'{family}'" for family in PREFERRED_UI_FONTS)
-    body_font = _build_ui_font(18, QFont.Weight.DemiBold)
-    hint_font = _build_ui_font(17, QFont.Weight.Medium)
-    error_font = _build_ui_font(16, QFont.Weight.Bold)
-    input_font = _build_ui_font(17, QFont.Weight.Medium)
-    button_font = _build_ui_font(17, QFont.Weight.Bold)
+    body_font = _build_ui_font(19, QFont.Weight.Bold)
+    hint_font = _build_ui_font(18, QFont.Weight.DemiBold)
+    error_font = _build_ui_font(17, QFont.Weight.Bold)
+    input_font = _build_ui_font(18, QFont.Weight.Medium)
+    button_font = _build_ui_font(18, QFont.Weight.Bold)
     dialog.setStyleSheet(
         f"""
         QDialog {{
             background-color: #F8FAFF;
             font-family: {font_stack};
         }}
+        QDialog QLabel {{
+            font-weight: 700;
+        }}
         QDialog QLineEdit {{
-            font-size: 17px;
+            font-size: 18px;
             padding: 10px 14px;
             border-radius: 10px;
             border: 2px solid #9FB4D9;
@@ -2352,6 +2355,15 @@ class EasterEggDialog(QtWidgets.QDialog):
         message.setWordWrap(True)
         message.setProperty("popup-role", "body")
         layout.addWidget(message)
+        quote = QtWidgets.QLabel(
+            "<i>“코드를 닫을 때마다 또 다른 아이디어가 부팅됩니다.”<br>"
+            "— AutoClose Studio 비밀 노트</i>"
+        )
+        quote.setAlignment(Qt.AlignCenter)
+        quote.setWordWrap(True)
+        quote.setTextFormat(Qt.RichText)
+        quote.setProperty("popup-role", "hint")
+        layout.addWidget(quote)
         close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         close_btn.rejected.connect(self.reject)
         close_btn.accepted.connect(self.accept)
@@ -2784,7 +2796,10 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.addWidget(self.page_title, 0)
         top_layout.addStretch(1)
         self.logo_container = QtWidgets.QWidget()
-        self.logo_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.logo_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
+        )
+        self.logo_container.setMinimumWidth(360)
         logo_layout = QtWidgets.QHBoxLayout(self.logo_container)
         logo_layout.setContentsMargins(0, 0, 0, 0)
         logo_layout.setSpacing(0)
@@ -2792,7 +2807,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        self.logo_label.setFixedHeight(46)
+        self.logo_label.setFixedHeight(64)
+        self.logo_label.setMinimumWidth(280)
         self.logo_label.setCursor(Qt.PointingHandCursor)
         logo_layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
         logo_layout.addStretch(1)
@@ -3094,7 +3110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scheduler._compute_next_run()
 
     def _generate_header_logo(self) -> QtGui.QPixmap:
-        width, height = 260, 44
+        width, height = 320, 56
         pixmap = QtGui.QPixmap(width, height)
         pixmap.fill(Qt.transparent)
         painter = QtGui.QPainter(pixmap)
@@ -3103,58 +3119,90 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
-        accent_outline = QtGui.QColor(accent).darker(130)
-        background = QtGui.QColor(255, 255, 255, 235)
-        tagline_color = QtGui.QColor(accent).lighter(160)
+        accent_outline = QtGui.QColor(accent).darker(160)
+        capsule_light = QtGui.QColor(255, 255, 255, 245)
+        tagline_color = QtGui.QColor(accent).lighter(155)
 
         # 로고 캡슐 배경
+        capsule_rect = QtCore.QRectF(2, 2, width - 4, height - 4)
         outline_pen = QtGui.QPen(accent_outline)
-        outline_pen.setWidthF(1.6)
+        outline_pen.setWidthF(2.2)
         outline_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(outline_pen)
-        painter.setBrush(background)
-        painter.drawRoundedRect(QtCore.QRectF(1.5, 1.5, width - 3, height - 3), 16, 16)
+        gradient = QtGui.QLinearGradient(0, 0, width, height)
+        gradient.setColorAt(0.0, QtGui.QColor(accent).lighter(180))
+        gradient.setColorAt(0.35, QtGui.QColor(accent).lighter(140))
+        gradient.setColorAt(1.0, QtGui.QColor(accent).lighter(170))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(capsule_rect, 20, 20)
+
+        # 안쪽 캡슐 하이라이트
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 180), 1.2))
+        painter.setBrush(capsule_light)
+        painter.drawRoundedRect(capsule_rect.adjusted(6, 6, -6, -6), 18, 18)
 
         # 좌측 전원 아이콘
-        icon_rect = QtCore.QRectF(14, 6, 32, 32)
+        icon_rect = QtCore.QRectF(18, 10, 36, 36)
         painter.setPen(Qt.NoPen)
         painter.setBrush(accent)
         painter.drawEllipse(icon_rect)
 
+        glow = QtGui.QRadialGradient(icon_rect.center(), icon_rect.width() / 2)
+        glow.setColorAt(0.0, QtGui.QColor(255, 255, 255, 220))
+        glow.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
+        painter.setBrush(glow)
+        painter.drawEllipse(icon_rect.adjusted(-6, -6, 6, 6))
+
+        painter.setBrush(accent)
+        painter.drawEllipse(icon_rect)
+
         power_pen = QtGui.QPen(Qt.white)
-        power_pen.setWidthF(2.8)
+        power_pen.setWidthF(3.2)
         power_pen.setCapStyle(Qt.RoundCap)
         painter.setPen(power_pen)
-        arc_rect = icon_rect.adjusted(6, 4, -6, -4)
-        painter.drawArc(arc_rect, 40 * 16, 280 * 16)
+        arc_rect = icon_rect.adjusted(6, 5, -6, -5)
+        painter.drawArc(arc_rect, 35 * 16, 290 * 16)
         painter.drawLine(
-            QtCore.QPointF(icon_rect.center().x(), icon_rect.top() + 7),
-            QtCore.QPointF(icon_rect.center().x(), icon_rect.center().y() + 6),
+            QtCore.QPointF(icon_rect.center().x(), icon_rect.top() + 8),
+            QtCore.QPointF(icon_rect.center().x(), icon_rect.center().y() + 7),
         )
 
         # 텍스트 구성
-        text_left = icon_rect.right() + 12
-        text_rect = QtCore.QRectF(text_left, 6, width - text_left - 18, 22)
-        title_font = _build_ui_font(16, QFont.Weight.Bold)
+        text_left = icon_rect.right() + 20
+        title_rect = QtCore.QRectF(text_left, 8, width - text_left - 26, 28)
+        title_font = _build_ui_font(22, QFont.Weight.Black)
         painter.setFont(title_font)
-        painter.setPen(accent_outline)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#0B1324")))
         metrics = painter.fontMetrics()
-        baseline = text_rect.top() + (text_rect.height() + metrics.ascent() - metrics.descent()) / 2
-        painter.drawText(QtCore.QPointF(text_rect.left(), baseline), "AutoClose")
+        baseline = title_rect.top() + (
+            title_rect.height() + metrics.ascent() - metrics.descent()
+        ) / 2
+        painter.drawText(QtCore.QPointF(title_rect.left(), baseline), "AUTO")
+
+        close_left = title_rect.left() + metrics.horizontalAdvance("AUTO ")
         painter.setPen(QtGui.QPen(accent))
-        painter.drawText(
-            QtCore.QPointF(
-                text_rect.left() + metrics.horizontalAdvance("AutoClose "), baseline
-            ),
-            "Studio",
+        painter.drawText(QtCore.QPointF(close_left, baseline), "CLOSE")
+
+        # 하단 태그라인과 구분선
+        divider_pen = QtGui.QPen(QtGui.QColor(accent_outline))
+        divider_pen.setWidthF(1.1)
+        painter.setPen(divider_pen)
+        painter.drawLine(
+            QtCore.QPointF(text_left, height - 20),
+            QtCore.QPointF(width - 30, height - 20),
         )
 
-        tagline_font = _build_ui_font(10, QFont.Weight.Medium)
+        tagline_font = _build_ui_font(11, QFont.Weight.Medium)
         tagline_font.setCapitalization(QFont.AllUppercase)
         painter.setFont(tagline_font)
         painter.setPen(QtGui.QPen(tagline_color))
-        tagline_rect = QtCore.QRectF(text_left, height - 15, width - text_left - 18, 12)
-        painter.drawText(tagline_rect, Qt.AlignLeft | Qt.AlignBottom, "Schedule Automation")
+        tagline_rect = QtCore.QRectF(text_left, height - 18, width - text_left - 26, 16)
+        painter.drawText(
+            tagline_rect,
+            Qt.AlignLeft | Qt.AlignBottom,
+            "Automation Flow Studio",
+        )
+
 
         painter.end()
         return pixmap
@@ -3172,7 +3220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if pixmap is None:
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다. 고급 설정에서 이미지를 교체할 수 있습니다."
-        scaled = pixmap.scaledToHeight(44, Qt.SmoothTransformation)
+        scaled = pixmap.scaledToHeight(56, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setToolTip(tooltip)
 
