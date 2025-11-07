@@ -69,8 +69,36 @@ def resource_path(relative: str) -> Path:
 
 
 DEFAULT_ASSET_DIR = "assets"
-DEFAULT_HEADER_LOGO = resource_path(f"{DEFAULT_ASSET_DIR}/topbar_logo.png")
 DEFAULT_APP_ICON = resource_path(f"{DEFAULT_ASSET_DIR}/app_icon.ico")
+
+PREFERRED_UI_FONTS = [
+    "Noto Sans KR",
+    "Malgun Gothic",
+    "Apple SD Gothic Neo",
+    "Pretendard",
+    "Nanum Gothic",
+    "Segoe UI",
+    "Arial",
+]
+
+
+def _build_ui_font(point_size: int, weight: int) -> QFont:
+    font = QFont()
+    set_families = getattr(font, "setFamilies", None)
+    if callable(set_families):
+        set_families(PREFERRED_UI_FONTS)
+    else:  # pragma: no cover - Qt < 6.2 fallback
+        font.setFamily(PREFERRED_UI_FONTS[0])
+    font.setPointSize(point_size)
+    font.setWeight(weight)
+    if weight >= QFont.Weight.DemiBold:
+        font.setBold(True)
+    hinting_pref = getattr(QFont, "HintingPreference", None)
+    set_hinting = getattr(font, "setHintingPreference", None)
+    if hinting_pref is not None and callable(set_hinting):
+        set_hinting(hinting_pref.PreferFullHinting)
+    font.setStyleStrategy(QFont.PreferAntialias)
+    return font
 
 def hash_password(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -1821,12 +1849,8 @@ class SettingsPanel(FancyCard):
             text = f"{status}: {name}"
             tooltip = path
         else:
-            if DEFAULT_HEADER_LOGO.exists():
-                text = f"기본 로고 사용 중 ({DEFAULT_HEADER_LOGO.name})"
-                tooltip = str(DEFAULT_HEADER_LOGO)
-            else:
-                text = "기본 로고 사용 중"
-                tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
+            text = "기본 로고 사용 중 (자동 생성)"
+            tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
         self.logo_path_label.setText(text)
         self.logo_path_label.setToolTip(tooltip)
 
@@ -1985,25 +2009,22 @@ class PasswordChangeDialog(QtWidgets.QDialog):
         self.accept()
 
 def _apply_popup_typography(dialog: QtWidgets.QDialog) -> None:
-    font_family = "Noto Sans KR"
     text_color = QColor("#0F172A")
     hint_color = QColor("#26364A")
     error_color = QColor("#D32F2F")
     accent_color = "#2A5CAA"
     disabled_accent = "#B0C6F0"
-    body_font = QFont(font_family, 18)
-    body_font.setWeight(QFont.DemiBold)
-    hint_font = QFont(font_family, 17)
-    hint_font.setWeight(QFont.Medium)
-    error_font = QFont(font_family, 15)
-    error_font.setWeight(QFont.DemiBold)
-    input_font = QFont(font_family, 17)
-    button_font = QFont(font_family, 17)
-    button_font.setWeight(QFont.Bold)
+    font_stack = ", ".join(f"'{family}'" for family in PREFERRED_UI_FONTS)
+    body_font = _build_ui_font(18, QFont.Weight.DemiBold)
+    hint_font = _build_ui_font(17, QFont.Weight.Medium)
+    error_font = _build_ui_font(16, QFont.Weight.Bold)
+    input_font = _build_ui_font(17, QFont.Weight.Medium)
+    button_font = _build_ui_font(17, QFont.Weight.Bold)
     dialog.setStyleSheet(
         f"""
         QDialog {{
             background-color: #F8FAFF;
+            font-family: {font_stack};
         }}
         QDialog QLineEdit {{
             font-size: 17px;
@@ -2079,7 +2100,6 @@ def _format_message_html(text: str) -> str:
 
 
 def _apply_messagebox_typography(box: QtWidgets.QMessageBox, level: str) -> None:
-    font_family = "Noto Sans KR"
     palette = box.palette()
     palette.setColor(QPalette.Window, QColor("#F4F7FF"))
     palette.setColor(QPalette.WindowText, QColor("#0F172A"))
@@ -2092,22 +2112,24 @@ def _apply_messagebox_typography(box: QtWidgets.QMessageBox, level: str) -> None
         "error": "#9C1F1F",
     }
     text_color = tone_map.get(level, tone_map["info"])
+    font_stack = ", ".join(f"'{family}'" for family in PREFERRED_UI_FONTS)
     box.setStyleSheet(
         f"""
         QMessageBox {{
             background-color: #F4F7FF;
             border-radius: 18px;
+            font-family: {font_stack};
         }}
         QMessageBox QLabel {{
             color: {text_color};
-            font-family: '{font_family}';
+            font-weight: 600;
         }}
         QMessageBox QPushButton {{
             background-color: {accent};
             border-radius: 12px;
             padding: 8px 22px;
             color: #FFFFFF;
-            font-family: '{font_family}';
+            font-family: {font_stack};
             font-weight: 700;
             font-size: 15px;
         }}
@@ -2121,8 +2143,7 @@ def _apply_messagebox_typography(box: QtWidgets.QMessageBox, level: str) -> None
     )
     label = box.findChild(QtWidgets.QLabel, "qt_msgbox_label")
     if label is not None:
-        font = QFont(font_family, 16)
-        font.setWeight(QFont.DemiBold)
+        font = _build_ui_font(16, QFont.Weight.DemiBold)
         label.setFont(font)
         label.setWordWrap(True)
         label.setTextFormat(Qt.RichText)
@@ -2130,8 +2151,10 @@ def _apply_messagebox_typography(box: QtWidgets.QMessageBox, level: str) -> None
     info = box.findChild(QtWidgets.QLabel, "qt_msgboxex_icon_label")
     if info is not None:
         info.setMaximumWidth(64)
+    button_font = _build_ui_font(15, QFont.Weight.Bold)
     for button in box.findChildren(QtWidgets.QPushButton):
         button.setCursor(Qt.PointingHandCursor)
+        button.setFont(button_font)
 
 
 def _show_message(parent, title: str, text: str, level: str = "info") -> QtWidgets.QMessageBox.StandardButton:
@@ -2529,9 +2552,6 @@ def _load_brand_icon() -> Optional[QIcon]:
 
 
 def create_tray_icon(accent_color: str) -> QIcon:
-    brand_icon = _load_brand_icon()
-    if brand_icon is not None:
-        return brand_icon
     pixmap = QtGui.QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QtGui.QPainter(pixmap)
@@ -2553,11 +2573,12 @@ class MainWindow(QtWidgets.QMainWindow):
     admin_login_requested = Signal()
     help_requested = Signal(str)
 
-    def __init__(self, cfg_mgr: ConfigManager) -> None:
+    def __init__(self, cfg_mgr: ConfigManager, brand_icon: Optional[QIcon] = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.setFixedSize(1040, 720)
         self.cfg_mgr = cfg_mgr
+        self._brand_icon = brand_icon
         self.scheduler = SchedulerEngine(cfg_mgr)
         self.audio_service = AudioService()
         self.audio_service.set_volume(self.cfg_mgr.config.audio_volume)
@@ -2573,7 +2594,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_secret_time: float = 0.0
         self.tray: Optional[QtWidgets.QSystemTrayIcon] = None
         self._build_palette()
-        self.setWindowIcon(create_tray_icon(self.cfg_mgr.config.theme_accent))
+        initial_icon = self._brand_icon or create_tray_icon(self.cfg_mgr.config.theme_accent)
+        self.setWindowIcon(initial_icon)
         self._build_ui()
         self._connect_signals()
         self.scheduler.start()
@@ -3041,13 +3063,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_theme(self, accent: str) -> None:
         self._build_palette()
-        icon = create_tray_icon(accent)
-        self.setWindowIcon(icon)
+        window_icon = self._brand_icon or create_tray_icon(accent)
+        self.setWindowIcon(window_icon)
         app = QtWidgets.QApplication.instance()
         if app is not None:
-            app.setWindowIcon(icon)
+            app.setWindowIcon(window_icon)
+        tray_icon = create_tray_icon(accent)
         if self.tray:
-            self.tray.setIcon(icon)
+            self.tray.setIcon(tray_icon)
         for card in self._cards:
             card.set_accent(accent)
 
@@ -3112,7 +3135,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 텍스트 구성
         text_left = icon_rect.right() + 12
         text_rect = QtCore.QRectF(text_left, 6, width - text_left - 18, 22)
-        title_font = QFont("Noto Sans KR", 16, QFont.DemiBold)
+        title_font = _build_ui_font(16, QFont.Weight.Bold)
         painter.setFont(title_font)
         painter.setPen(accent_outline)
         metrics = painter.fontMetrics()
@@ -3126,7 +3149,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Studio",
         )
 
-        tagline_font = QFont("Noto Sans KR", 9, QFont.Medium)
+        tagline_font = _build_ui_font(10, QFont.Weight.Medium)
         tagline_font.setCapitalization(QFont.AllUppercase)
         painter.setFont(tagline_font)
         painter.setPen(QtGui.QPen(tagline_color))
@@ -3139,21 +3162,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_header_logo(self, path: Optional[str]) -> None:
         pixmap: Optional[QtGui.QPixmap] = None
         tooltip = "상단 바에 표시할 로고 이미지를 고급 설정에서 선택하세요."
-        candidates: List[Path] = []
         if path:
-            candidates.append(Path(path))
-        candidates.append(DEFAULT_HEADER_LOGO)
-        for candidate_path in candidates:
-            if not candidate_path:
-                continue
+            candidate_path = Path(path)
             if candidate_path.exists():
                 candidate = QtGui.QPixmap(str(candidate_path))
                 if not candidate.isNull():
                     pixmap = candidate
                     tooltip = str(candidate_path)
-                    break
         if pixmap is None:
             pixmap = self._generate_header_logo()
+            tooltip = "기본 전원 로고가 적용되었습니다. 고급 설정에서 이미지를 교체할 수 있습니다."
         scaled = pixmap.scaledToHeight(44, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setToolTip(tooltip)
@@ -3312,9 +3330,11 @@ class App(QtWidgets.QApplication):
         QtCore.QCoreApplication.setOrganizationDomain(ORGANIZATION_DOMAIN)
         self.setQuitOnLastWindowClosed(False)
         self.cfg_mgr = ConfigManager()
-        icon = create_tray_icon(self.cfg_mgr.config.theme_accent)
-        self.setWindowIcon(icon)
-        self.window = MainWindow(self.cfg_mgr)
+        brand_icon = _load_brand_icon()
+        accent = self.cfg_mgr.config.theme_accent
+        tray_icon = create_tray_icon(accent)
+        self.setWindowIcon(brand_icon or tray_icon)
+        self.window = MainWindow(self.cfg_mgr, brand_icon)
         self.window.set_locked(True)
         self.window.show_login_requested.connect(lambda: self._show_user_login(initial=False))
         self.window.logout_requested.connect(self._lock_from_user)
