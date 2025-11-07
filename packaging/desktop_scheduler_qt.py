@@ -3071,21 +3071,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scheduler._compute_next_run()
 
     def _generate_header_logo(self) -> QtGui.QPixmap:
-        pixmap = QtGui.QPixmap(200, 54)
+        width, height = 260, 44
+        pixmap = QtGui.QPixmap(width, height)
         pixmap.fill(Qt.transparent)
         painter = QtGui.QPainter(pixmap)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setRenderHints(
+            QtGui.QPainter.Antialiasing | QtGui.QPainter.TextAntialiasing
+        )
+
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
-        gradient = QtGui.QLinearGradient(0, 0, pixmap.width(), pixmap.height())
-        gradient.setColorAt(0.0, accent.lighter(130))
-        gradient.setColorAt(1.0, accent.darker(110))
-        painter.setBrush(gradient)
+        accent_outline = QtGui.QColor(accent).darker(130)
+        background = QtGui.QColor(255, 255, 255, 235)
+        tagline_color = QtGui.QColor(accent).lighter(160)
+
+        # 로고 캡슐 배경
+        outline_pen = QtGui.QPen(accent_outline)
+        outline_pen.setWidthF(1.6)
+        outline_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(outline_pen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(QtCore.QRectF(1.5, 1.5, width - 3, height - 3), 16, 16)
+
+        # 좌측 전원 아이콘
+        icon_rect = QtCore.QRectF(14, 6, 32, 32)
         painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(6, 6, pixmap.width() - 12, pixmap.height() - 12, 20, 20)
-        painter.setPen(Qt.white)
-        font = QtGui.QFont("Noto Sans KR", 18, QtGui.QFont.Black)
-        painter.setFont(font)
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "AutoClose Studio")
+        painter.setBrush(accent)
+        painter.drawEllipse(icon_rect)
+
+        power_pen = QtGui.QPen(Qt.white)
+        power_pen.setWidthF(2.8)
+        power_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(power_pen)
+        arc_rect = icon_rect.adjusted(6, 4, -6, -4)
+        painter.drawArc(arc_rect, 40 * 16, 280 * 16)
+        painter.drawLine(
+            QtCore.QPointF(icon_rect.center().x(), icon_rect.top() + 7),
+            QtCore.QPointF(icon_rect.center().x(), icon_rect.center().y() + 6),
+        )
+
+        # 텍스트 구성
+        text_left = icon_rect.right() + 12
+        text_rect = QtCore.QRectF(text_left, 6, width - text_left - 18, 22)
+        title_font = QFont("Noto Sans KR", 16, QFont.DemiBold)
+        painter.setFont(title_font)
+        painter.setPen(accent_outline)
+        metrics = painter.fontMetrics()
+        baseline = text_rect.top() + (text_rect.height() + metrics.ascent() - metrics.descent()) / 2
+        painter.drawText(QtCore.QPointF(text_rect.left(), baseline), "AutoClose")
+        painter.setPen(QtGui.QPen(accent))
+        painter.drawText(
+            QtCore.QPointF(
+                text_rect.left() + metrics.horizontalAdvance("AutoClose "), baseline
+            ),
+            "Studio",
+        )
+
+        tagline_font = QFont("Noto Sans KR", 9, QFont.Medium)
+        tagline_font.setCapitalization(QFont.AllUppercase)
+        painter.setFont(tagline_font)
+        painter.setPen(QtGui.QPen(tagline_color))
+        tagline_rect = QtCore.QRectF(text_left, height - 15, width - text_left - 18, 12)
+        painter.drawText(tagline_rect, Qt.AlignLeft | Qt.AlignBottom, "Schedule Automation")
+
         painter.end()
         return pixmap
 
