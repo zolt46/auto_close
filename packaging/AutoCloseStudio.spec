@@ -1,7 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import importlib.util
-
 _pathlib_spec = importlib.util.find_spec("pathlib")
 if _pathlib_spec and _pathlib_spec.origin and "site-packages" in _pathlib_spec.origin:
     raise SystemExit(
@@ -10,12 +9,13 @@ if _pathlib_spec and _pathlib_spec.origin and "site-packages" in _pathlib_spec.o
     )
 
 from pathlib import Path
-
 import PySide6
 
 block_cipher = None
-ROOT = Path(r"C:\Users\seewo\Desktop\closing_new_proj")
-ASSET_DIR = ROOT / "assets"
+
+ROOT = Path(r"C:\Users\seewo\Desktop\closing_new_proj\auto_close")
+SRC_DIR = ROOT / "packaging"
+ASSET_DIR = SRC_DIR / "assets"
 PYSIDE_PLUGINS = Path(PySide6.__file__).resolve().parent / "plugins"
 
 asset_datas = []
@@ -25,22 +25,18 @@ for name in ("app_icon.ico", "topbar_logo.png"):
         asset_datas.append((str(src), "assets"))
 
 qt_plugin_datas = []
-for plugin in ("platforms", "styles"):
+for plugin in ("platforms", "styles", "audio", "multimedia"):
     src = PYSIDE_PLUGINS / plugin
     if src.exists():
         qt_plugin_datas.append((str(src), f"PySide6/plugins/{plugin}"))
 
-hiddenimports = [
-    "PySide6.QtMultimedia",
-    "PySide6.QtMultimediaWidgets",
-    "PySide6.QtNetwork",
-]
+hiddenimports = ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtNetwork"]
 
 a = Analysis(
-    ['desktop_scheduler_qt.py'],
-    pathex=[str(ROOT)],
+    [str(SRC_DIR / 'desktop_scheduler_qt.py')],
+    pathex=[str(ROOT), str(SRC_DIR)],
     binaries=[],
-    datas=asset_datas + qt_plugin_datas,
+    datas=[(str(ASSET_DIR), 'assets')] + asset_datas + qt_plugin_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -51,32 +47,23 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+# ★ onefile: EXE에 모든 리소스 전달, COLLECT 사용하지 않음
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='AutoCloseStudio',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,                      # 반드시 False
     console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=str(ASSET_DIR / 'app_icon.ico') if (ASSET_DIR / 'app_icon.ico').exists() else None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='AutoCloseStudio',
+    icon=str(ASSET_DIR / 'app_icon.ico'),
+    runtime_tmpdir='.',             # EXE 옆으로 풀기 (_internal 폴더 생성)
 )

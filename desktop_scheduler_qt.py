@@ -535,14 +535,16 @@ class SchedulerEngine(QtCore.QObject):
 class AudioService(QtCore.QObject):
     playback_started = Signal(str)
     playback_finished = Signal(str)
+    playback_error = Signal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
         self.player.mediaStatusChanged.connect(self._status_changed)
         self.player.playbackStateChanged.connect(self._playback_changed)
+        self.player.errorOccurred.connect(self._on_error)
         self._current: Optional[str] = None
         self._volume: float = 0.9
         self.audio_output.setVolume(self._volume)
@@ -557,14 +559,28 @@ class AudioService(QtCore.QObject):
 
     def play(self, path: str) -> None:
         if not path:
+            self._current = None
+            self.player.stop()
             self.playback_finished.emit("")
             return
-        url = QtCore.QUrl.fromLocalFile(path)
+        file_path = Path(path).expanduser()
+        if not file_path.exists():
+            resolved = str(file_path)
+            self._current = None
+            self.player.stop()
+            self.playback_error.emit(resolved, "파일을 찾을 수 없습니다. 경로를 다시 확인하세요.")
+            self.playback_finished.emit(resolved)
+            return
+        url = QtCore.QUrl.fromLocalFile(str(file_path))
+        if self.player.playbackState() != QMediaPlayer.StoppedState:
+            self._current = None
+            self.player.stop()
         self.player.setSource(url)
+        self.player.setPosition(0)
         self.audio_output.setVolume(self._volume)
-        self._current = path
+        self._current = str(file_path)
         self.player.play()
-        self.playback_started.emit(path)
+        self.playback_started.emit(self._current)
 
     def stop(self) -> None:
         if self.player.playbackState() != QMediaPlayer.StoppedState:
@@ -573,6 +589,9 @@ class AudioService(QtCore.QObject):
     def _status_changed(self, status: QMediaPlayer.MediaStatus) -> None:  # pragma: no cover - Qt callback
         if status == QMediaPlayer.InvalidMedia:
             path = self._current or ""
+            if path:
+                self.playback_error.emit(path, "지원하지 않는 형식이거나 손상된 파일입니다.")
+            self._current = None
             self.playback_finished.emit(path)
 
     def _playback_changed(self, state: QMediaPlayer.PlaybackState) -> None:  # pragma: no cover - Qt callback
@@ -581,6 +600,14 @@ class AudioService(QtCore.QObject):
             self._current = None
             self.playback_finished.emit(path)
 
+    def _on_error(self, error: QMediaPlayer.Error, error_string: str) -> None:  # pragma: no cover - Qt callback
+        if error == QMediaPlayer.NoError:
+            return
+        path = self._current or ""
+        message = error_string or "음성 재생 중 알 수 없는 문제가 발생했습니다."
+        self._current = None
+        self.playback_error.emit(path, message)
+        self.playback_finished.emit(path)
 
 def terminate_programs(targets: List[str]) -> None:
     lowered = {t.lower() for t in targets}
@@ -3065,6 +3092,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scheduler.next_run_changed.connect(self._on_next_run_changed)
         self.audio_service.playback_started.connect(self._on_playback_started)
         self.audio_service.playback_finished.connect(self._on_playback_finished)
+        self.audio_service.playback_error.connect(self._on_playback_error)
         preview_signal = getattr(self.playlist_panel, "preview_requested", None)
         if preview_signal is not None:
             preview_signal.connect(self._on_preview_requested)
@@ -3324,6 +3352,17 @@ class MainWindow(QtWidgets.QMainWindow):
         day_label = DAY_LABEL.get(self._active_day_key or "", "일정")
         name = Path(path).name if path else "음성 없음"
         self.overlay.show_message(f"{day_label} - {name} 재생 중")
+
+    def _on_playback_error(self, path: str, message: str) -> None:
+        readable = Path(path).name if path else "음성 파일"
+        detail = message or "음성 재생 중 오류가 발생했습니다."
+        body = f"{readable}\n{detail}" if readable else detail
+        show_error_message(self, "재생 오류", body)
+        if self.tray:
+            self.tray.showMessage(APP_NAME, f"재생 오류: {detail}", QtWidgets.QSystemTrayIcon.Warning, 4000)
+        if self._playback_mode == "schedule":
+            day_label = DAY_LABEL.get(self._active_day_key or "", "일정")
+            self.overlay.show_message(f"{day_label} - 음성 재생 실패, 다음 단계 진행")
 
     def _on_playback_finished(self, _: str) -> None:
         if self._ignore_playback_finished:
