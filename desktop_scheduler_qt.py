@@ -468,6 +468,7 @@ class SchedulerEngine(QtCore.QObject):
         self.cfg_mgr = cfg_mgr
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._last_trigger_marker: Optional[Tuple[str, date]] = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -503,11 +504,18 @@ class SchedulerEngine(QtCore.QObject):
         cfg = self.cfg_mgr.config
         day_key = DAY_KEYS[now.weekday()]
         day_cfg = cfg.days[day_key]
+        if day_cfg.last_ran != now.date().isoformat():
+            self._last_trigger_marker = None
         if not self._is_day_eligible(cfg, day_cfg, now.date()):
             return
         hh, mm = map(int, day_cfg.time.split(":"))
         target_time = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if 0 <= (now - target_time).total_seconds() <= 30:
+        delta = (now - target_time).total_seconds()
+        if 0 <= delta <= 30:
+            marker = (day_key, now.date())
+            if self._last_trigger_marker == marker:
+                return
+            self._last_trigger_marker = marker
             audio_path = self._resolve_audio(cfg, day_cfg)
             self.schedule_triggered.emit(
                 day_key,
@@ -578,13 +586,36 @@ class AudioService(QtCore.QObject):
         self.player.setSource(url)
         self.player.setPosition(0)
         self.audio_output.setVolume(self._volume)
-        self._current = str(file_path)
+        try:
+            normalized = file_path.resolve(strict=False)
+        except Exception:
+            normalized = file_path.absolute()
+        self._current = str(normalized)
         self.player.play()
         self.playback_started.emit(self._current)
 
     def stop(self) -> None:
         if self.player.playbackState() != QMediaPlayer.StoppedState:
             self.player.stop()
+
+    def current_source(self) -> Optional[str]:
+        return self._current if self.player.playbackState() != QMediaPlayer.StoppedState else None
+
+    def is_playing_source(self, path: Optional[str]) -> bool:
+        if self.player.playbackState() != QMediaPlayer.PlayingState:
+            return False
+        if not path or not self._current:
+            return False
+        candidate = Path(path).expanduser()
+        try:
+            candidate_norm = candidate.resolve(strict=False)
+        except Exception:
+            candidate_norm = candidate.absolute()
+        try:
+            current_norm = Path(self._current).resolve(strict=False)
+        except Exception:
+            current_norm = Path(self._current).absolute()
+        return os.path.normcase(str(current_norm)) == os.path.normcase(str(candidate_norm))
 
     def _status_changed(self, status: QMediaPlayer.MediaStatus) -> None:  # pragma: no cover - Qt callback
         if status == QMediaPlayer.InvalidMedia:
@@ -622,13 +653,18 @@ def terminate_programs(targets: List[str]) -> None:
 
 def shutdown_remote(hosts: List[Dict[str, str]]) -> None:
     for host in hosts:
-        method = host.get("method", "winrm")
+        method = (host.get("method") or "winrm").lower()
+        target = (host.get("host") or "").strip()
+        if not target:
+            continue
         try:
-            if method == "ssh" and paramiko:
+            if method == "ssh":
+                if not paramiko:
+                    raise RuntimeError("paramiko가 포함되지 않아 SSH 원격 종료를 실행할 수 없습니다.")
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 ssh.connect(
-                    hostname=host.get("host"),
+                    hostname=target,
                     username=host.get("username"),
                     password=host.get("password"),
                     timeout=10,
@@ -636,9 +672,21 @@ def shutdown_remote(hosts: List[Dict[str, str]]) -> None:
                 ssh.exec_command("shutdown -h now")
                 ssh.close()
             elif method == "winrm":
-                os.system(f"shutdown /m \\{host.get('host')} /s /t 0")
+                command = ["shutdown", "/m", f"\\\\{target}", "/s", "/t", "0"]
+                username = (host.get("username") or "").strip()
+                password = host.get("password") or ""
+                if username:
+                    command.extend(["/u", username])
+                    if password:
+                        command.extend(["/p", password])
+                completed = subprocess.run(command, capture_output=True, text=True)
+                if completed.returncode != 0:
+                    detail = completed.stderr.strip() or completed.stdout.strip() or f"종료 코드 {completed.returncode}"
+                    raise RuntimeError(detail)
+            else:
+                raise ValueError(f"지원하지 않는 원격 종료 방식: {method}")
         except Exception as exc:
-            print(f"[원격 종료 실패] {host.get('host')}: {exc}")
+            print(f"[원격 종료 실패] {target}: {exc}")
 
 
 def shutdown_local(delay: int) -> None:
@@ -3296,6 +3344,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.logout_requested.emit()
 
     def _on_schedule_triggered(self, day_key: str, audio_path: str, allow_remote: bool, allow_local: bool) -> None:
+        if (
+            self._playback_mode == "schedule"
+            and self._active_day_key == day_key
+            and self.audio_service.is_playing_source(audio_path)
+        ):
+            prev_remote, prev_local = self._pending_follow_up or (False, False)
+            self._pending_follow_up = (prev_remote or allow_remote, prev_local or allow_local)
+            return
         if self.audio_service.player.playbackState() != QMediaPlayer.StoppedState:
             if self._playback_mode == "schedule":
                 self._pending_follow_up = None
