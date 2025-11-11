@@ -651,9 +651,30 @@ def terminate_programs(targets: List[str]) -> None:
             continue
 
 
-def shutdown_remote(hosts: List[Dict[str, str]]) -> None:
+def _escape_powershell(value: str) -> str:
+    return value.replace("`", "``").replace("\"", "`\"")
+
+
+def shutdown_remote(
+    hosts: List[Dict[str, str]],
+    result_callback: Optional[Callable[[str, bool, str], None]] = None,
+) -> None:
+    def notify(target: str, success: bool, message: str) -> None:
+        if result_callback is not None:
+            try:
+                result_callback(target, success, message)
+            except Exception:
+                pass
+        else:
+            status = "성공" if success else "실패"
+            print(f"[원격 종료 {status}] {target or '알 수 없음'}: {message}")
+
     for host in hosts:
         method = (host.get("method") or "winrm").lower()
+        target = (host.get("host") or "").strip()
+        if not target:
+            notify("", False, "대상 호스트가 비어 있습니다.")
+            continue
         target = (host.get("host") or "").strip()
         if not target:
             continue
@@ -665,11 +686,14 @@ def shutdown_remote(hosts: List[Dict[str, str]]) -> None:
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 ssh.connect(
                     hostname=target,
-                    username=host.get("username"),
-                    password=host.get("password"),
+                    username=host.get("username") or None,
+                    password=host.get("password") or None,
                     timeout=10,
+                    look_for_keys=False,
+                    allow_agent=False,
                 )
-                ssh.exec_command("shutdown -h now")
+                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
+                stdout.channel.recv_exit_status()
                 ssh.close()
             elif method == "winrm":
                 command = ["shutdown", "/m", f"\\\\{target}", "/s", "/t", "0"]
