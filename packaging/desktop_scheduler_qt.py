@@ -682,6 +682,33 @@ def shutdown_remote(
             if method == "ssh":
                 if not paramiko:
                     raise RuntimeError("paramiko가 포함되지 않아 SSH 원격 종료를 실행할 수 없습니다.")
+
+                def _collect_ssh_commands() -> List[str]:
+                    commands: List[str] = []
+                    for key in ("command", "shutdown_command"):
+                        value = host.get(key)
+                        if isinstance(value, str) and value.strip():
+                            commands.append(value.strip())
+                    extra = host.get("commands") or host.get("shutdown_commands")
+                    if isinstance(extra, (list, tuple)):
+                        for item in extra:
+                            if isinstance(item, str) and item.strip():
+                                commands.append(item.strip())
+                    platform_hint = (host.get("platform") or "").lower()
+                    if platform_hint:
+                        if "win" in platform_hint:
+                            commands.append("shutdown /s /t 0")
+                        elif any(token in platform_hint for token in ("linux", "unix", "mac", "darwin")):
+                            commands.append("shutdown -h now")
+                    if not commands:
+                        commands.extend(["shutdown /s /t 0", "shutdown -h now"])
+                    seen: List[str] = []
+                    for cmd in commands:
+                        if cmd not in seen:
+                            seen.append(cmd)
+                    return seen
+
+                ssh_commands = _collect_ssh_commands()
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 ssh.connect(
@@ -692,9 +719,31 @@ def shutdown_remote(
                     look_for_keys=False,
                     allow_agent=False,
                 )
-                stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
-                stdout.channel.recv_exit_status()
-                ssh.close()
+
+                errors: List[str] = []
+                success = False
+                try:
+                    for command in ssh_commands:
+                        try:
+                            stdin, stdout, stderr = ssh.exec_command(command)
+                            exit_status = stdout.channel.recv_exit_status()
+                            if exit_status == 0:
+                                notify(target, True, f"SSH 명령 전송: {command}")
+                                success = True
+                                break
+                            detail = stderr.read().decode("utf-8", errors="ignore").strip()
+                            if not detail:
+                                detail = stdout.read().decode("utf-8", errors="ignore").strip()
+                            detail = detail or f"종료 코드 {exit_status}"
+                            errors.append(f"{command}: {detail}")
+                        except Exception as ssh_exc:  # pragma: no cover - network dependent
+                            errors.append(f"{command}: {ssh_exc}")
+                    if not success:
+                        raise RuntimeError("; ".join(errors) or "알 수 없는 이유로 종료 명령 실패")
+                finally:
+                    ssh.close()
+                if success:
+                    continue
             elif method == "winrm":
                 command = ["shutdown", "/m", f"\\\\{target}", "/s", "/t", "0"]
                 username = (host.get("username") or "").strip()
