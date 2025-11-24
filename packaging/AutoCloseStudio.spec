@@ -51,6 +51,8 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # ★ onefile: EXE에 모든 리소스 전달, COLLECT 사용하지 않음
+# runtime_tmpdir는 기본값(사용자 임시폴더)을 그대로 사용한다.
+# Windows 시작 프로그램으로 등록된 경우에도 쓰기 권한 문제가 생기지 않는다.
 exe = EXE(
     pyz,
     a.scripts,
@@ -65,5 +67,4 @@ exe = EXE(
     upx=False,                      # 반드시 False
     console=False,
     icon=str(ASSET_DIR / 'app_icon.ico'),
-    runtime_tmpdir='.',             # EXE 옆으로 풀기 (_internal 폴더 생성)
 )
