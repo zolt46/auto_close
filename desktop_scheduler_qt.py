@@ -391,19 +391,31 @@ class ConfigManager(QtCore.QObject):
 
     def _load(self) -> SchedulerConfig:
         config_file = self.locator.config_file
+        backup_file = config_file.with_suffix(config_file.suffix + ".bak")
         raw_data: Optional[Dict[str, object]] = None
+        used_backup = False
         if config_file.exists():
             try:
                 raw_data = json.loads(config_file.read_text(encoding="utf-8"))
+            except Exception as exc:  # pragma: no cover - fall back to backup/default
+                print("[설정 읽기 실패]", exc)
+        if raw_data is None and backup_file.exists():
+            try:
+                raw_data = json.loads(backup_file.read_text(encoding="utf-8"))
+                used_backup = True
+            except Exception as exc:  # pragma: no cover - still fall back to default
+                print("[백업 설정 읽기 실패]", exc)
+        if raw_data is not None:
+            try:
                 config = SchedulerConfig.from_dict(raw_data)
-                if self._apply_migrations(config, raw_data):
+                if self._apply_migrations(config, raw_data) or used_backup:
                     try:
                         self._write(config)
                     except Exception as exc:  # pragma: no cover - non critical
                         print("[설정 마이그레이션 실패]", exc)
                 return config
             except Exception as exc:  # pragma: no cover - fall back to default
-                print("[설정 읽기 실패]", exc)
+                print("[설정 변환 실패]", exc)
         config = SchedulerConfig()
         if self._apply_migrations(config, raw_data):
             try:
@@ -423,10 +435,19 @@ class ConfigManager(QtCore.QObject):
     def _write(self, config: SchedulerConfig) -> None:
         config_file = self.locator.config_file
         config_file.parent.mkdir(parents=True, exist_ok=True)
-        config_file.write_text(
-            json.dumps(config.as_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        backup_file = config_file.with_suffix(config_file.suffix + ".bak")
+        tmp_file = config_file.with_suffix(config_file.suffix + ".tmp")
+        payload = json.dumps(config.as_dict(), ensure_ascii=False, indent=2)
+        try:
+            if config_file.exists():
+                shutil.copy2(config_file, backup_file)
+        except Exception:
+            pass
+        tmp_file.write_text(payload, encoding="utf-8")
+        try:
+            os.replace(tmp_file, config_file)
+        except Exception:
+            shutil.move(str(tmp_file), str(config_file))
 
     def save(self) -> None:
         with self._lock:
@@ -523,9 +544,7 @@ class SchedulerEngine(QtCore.QObject):
                 cfg.enable_remote_shutdown and day_cfg.allow_remote,
                 cfg.enable_local_shutdown and day_cfg.allow_local_shutdown,
             )
-            def _mark():
-                self.cfg_mgr.update(lambda c: c.days[day_key].__setattr__("last_ran", now.date().isoformat()))
-            QtCore.QTimer.singleShot(0, _mark)
+            self.cfg_mgr.update(lambda c: c.days[day_key].__setattr__("last_ran", now.date().isoformat()))
 
     def _resolve_audio(self, cfg: SchedulerConfig, day_cfg: DaySchedule) -> Optional[str]:
         if not day_cfg.auto_assign and day_cfg.audio_path:
@@ -536,7 +555,7 @@ class SchedulerEngine(QtCore.QObject):
         path = cfg.playlist[index]
         def _bump(config: SchedulerConfig) -> None:
             config.playlist_rotation = (config.playlist_rotation + 1) % max(1, len(config.playlist))
-        QtCore.QTimer.singleShot(0, lambda: self.cfg_mgr.update(_bump))
+        self.cfg_mgr.update(_bump)
         return path
 
 
