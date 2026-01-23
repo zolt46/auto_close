@@ -4165,16 +4165,10 @@ class MainWindow(QtWidgets.QMainWindow):
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다."
         target_height = self.logo_label.height() or 88
-        zoom_factor = 2.0
-        scaled = pixmap.scaledToHeight(int(target_height * zoom_factor), Qt.SmoothTransformation)
-        crop_width = max(1, int(scaled.width() / zoom_factor))
-        crop_height = max(1, int(scaled.height() / zoom_factor))
-        crop_x = max(0, int((scaled.width() - crop_width) / 2))
-        crop_y = max(0, int((scaled.height() - crop_height) / 2))
-        cropped = scaled.copy(crop_x, crop_y, crop_width, crop_height)
-        self.logo_label.setPixmap(cropped)
+        scaled = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
+        self.logo_label.setPixmap(scaled)
         self.logo_label.setScaledContents(False)
-        target_width = max(1, cropped.width())
+        target_width = max(1, scaled.width())
         self.logo_label.setFixedWidth(target_width)
         if self.logo_container:
             self.logo_container.setFixedWidth(target_width)
