@@ -4444,7 +4444,6 @@ class App(QtWidgets.QApplication):
         self._profile_run_cache: Dict[str, Tuple[float, bool]] = {}
         self._wakeup_check_lock = threading.Lock()
         self._wakeup_check_running = False
-        self._pending_raise_target = False
         self._schedule_boot_sequence()
         self._show_user_login(initial=True)
 
@@ -4569,7 +4568,7 @@ class App(QtWidgets.QApplication):
 
     def _start_wakeup_sequence(self, cfg: SchedulerConfig) -> None:
         self._launch_audio_window(cfg)
-        self._schedule_target_window(cfg)
+        self._launch_target_window(cfg)
         self._start_wakeup_monitor()
 
     def _show_screensaver(self) -> None:
@@ -4619,9 +4618,6 @@ class App(QtWidgets.QApplication):
             if self._screensaver_process and self._screensaver_process.poll() is None:
                 if idle_sec <= cfg.wakeup_active_threshold_sec:
                     self._screensaver_process.terminate()
-        if self._pending_raise_target:
-            self._pending_raise_target = False
-            self._ensure_target_on_top(cfg)
         if cfg.wakeup_chrome_repeat:
             self._schedule_wakeup_checks(cfg)
 
@@ -4635,8 +4631,6 @@ class App(QtWidgets.QApplication):
         def worker(snapshot: SchedulerConfig) -> None:
             try:
                 self._ensure_window_running(snapshot)
-                if snapshot.wakeup_target_enabled and (snapshot.wakeup_target_url or "").strip():
-                    self._pending_raise_target = True
             finally:
                 self._wakeup_check_running = False
                 self._wakeup_check_lock.release()
@@ -4668,16 +4662,7 @@ class App(QtWidgets.QApplication):
     def _schedule_target_window(self, cfg: SchedulerConfig) -> None:
         if not cfg.wakeup_target_enabled or not (cfg.wakeup_target_url or "").strip():
             return
-        profile_root = self.cfg_mgr.storage_directory() / "chrome_profiles" / "target"
-        if self._is_chrome_profile_running(profile_root):
-            return
-        if self._pending_target_timer is None:
-            self._pending_target_timer = QtCore.QTimer(self)
-            self._pending_target_timer.setSingleShot(True)
-            self._pending_target_timer.timeout.connect(lambda: self._launch_target_window(self.cfg_mgr.config))
-        if self._pending_target_timer.isActive():
-            return
-        self._pending_target_timer.start(1200)
+        self._launch_target_window(cfg)
 
     def _launch_target_window(self, cfg: SchedulerConfig) -> None:
         if not cfg.wakeup_target_enabled or not (cfg.wakeup_target_url or "").strip():
@@ -4791,8 +4776,6 @@ class App(QtWidgets.QApplication):
                 self._launch_audio_window(cfg)
         if cfg.wakeup_target_enabled and (cfg.wakeup_target_url or "").strip():
             target_profile = self.cfg_mgr.storage_directory() / "chrome_profiles" / "target"
-            if self._pending_target_timer and self._pending_target_timer.isActive():
-                return
             if self._is_chrome_profile_running(target_profile):
                 pass
             elif self._last_target_launch is None or (now - self._last_target_launch) >= cooldown:
