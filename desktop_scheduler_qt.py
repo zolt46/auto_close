@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import argparse
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -4432,6 +4433,7 @@ class App(QtWidgets.QApplication):
         self._login_dialog_open = False
         self._boot_sequence_started = False
         self._screensaver_overlay: Optional[ScreenSaverOverlay] = None
+        self._screensaver_process: Optional[subprocess.Popen] = None
         self._idle_detector = IdleTimeDetector()
         self._wakeup_timer: Optional[QtCore.QTimer] = None
         self._audio_process: Optional[subprocess.Popen] = None
@@ -4445,9 +4447,6 @@ class App(QtWidgets.QApplication):
         self._pending_raise_target = False
         self._schedule_boot_sequence()
         self._show_user_login(initial=True)
-
-    def is_already_running(self) -> bool:
-        return getattr(self, "_already_running", False)
 
     def is_already_running(self) -> bool:
         return getattr(self, "_already_running", False)
@@ -4576,9 +4575,16 @@ class App(QtWidgets.QApplication):
     def _show_screensaver(self) -> None:
         cfg = self.cfg_mgr.config
         image_path, mode = resolve_screensaver_image(cfg)
-        if self._screensaver_overlay is None:
-            self._screensaver_overlay = ScreenSaverOverlay()
-        self._screensaver_overlay.show_saver(image_path, mode)
+        if self._screensaver_process and self._screensaver_process.poll() is None:
+            return
+        args = [sys.executable, str(Path(__file__).resolve()), "--saver-only", "--mode", mode]
+        if image_path:
+            args.extend(["--image", str(image_path)])
+        self._screensaver_process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def _start_wakeup_monitor(self) -> None:
         cfg = self.cfg_mgr.config
@@ -4597,6 +4603,8 @@ class App(QtWidgets.QApplication):
                 self._wakeup_timer.stop()
             if self._screensaver_overlay:
                 self._screensaver_overlay.hide()
+            if self._screensaver_process and self._screensaver_process.poll() is None:
+                self._screensaver_process.terminate()
             return
         if getattr(self.window, "_playback_mode", "idle") == "schedule":
             return
@@ -4608,6 +4616,9 @@ class App(QtWidgets.QApplication):
             elif self._screensaver_overlay and self._screensaver_overlay.isVisible():
                 if idle_sec <= cfg.wakeup_active_threshold_sec:
                     self._screensaver_overlay.hide()
+            if self._screensaver_process and self._screensaver_process.poll() is None:
+                if idle_sec <= cfg.wakeup_active_threshold_sec:
+                    self._screensaver_process.terminate()
         if self._pending_raise_target:
             self._pending_raise_target = False
             self._ensure_target_on_top(cfg)
@@ -4788,7 +4799,21 @@ class App(QtWidgets.QApplication):
                 self._launch_target_window(cfg)
 
 
+def _run_screensaver_only(image_path: Optional[str], mode: str) -> int:
+    app = QtWidgets.QApplication(sys.argv)
+    overlay = ScreenSaverOverlay()
+    overlay.show_saver(Path(image_path) if image_path else None, mode)
+    return app.exec()
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--saver-only", action="store_true")
+    parser.add_argument("--mode", default="bundled")
+    parser.add_argument("--image", default=None)
+    args, _ = parser.parse_known_args()
+    if args.saver_only:
+        sys.exit(_run_screensaver_only(args.image, args.mode))
     app = App(sys.argv)
     if app.is_already_running():
         sys.exit(0)
