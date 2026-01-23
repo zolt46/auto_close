@@ -3353,16 +3353,37 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         painter = QtGui.QPainter(pixmap)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.setPen(QtGui.QColor("white"))
-        title_font = _build_ui_font(34, QFont.Weight.Bold)
-        subtitle_font = _build_ui_font(20, QFont.Weight.Medium)
+        title_font = _build_ui_font(56, QFont.Weight.Bold)
+        subtitle_font = _build_ui_font(28, QFont.Weight.Medium)
+        detail_font = _build_ui_font(22, QFont.Weight.Medium)
+        left_margin = int(size.width() * 0.08)
+        top_margin = int(size.height() * 0.2)
         painter.setFont(title_font)
-        painter.drawText(pixmap.rect().adjusted(0, -40, 0, 0), Qt.AlignCenter, "화면 보호 모드")
+        painter.drawText(
+            QtCore.QRect(left_margin, top_margin, size.width() - left_margin * 2, 80),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            "AutoWake",
+        )
         painter.setFont(subtitle_font)
         painter.drawText(
-            pixmap.rect().adjusted(0, 40, 0, 0),
-            Qt.AlignCenter,
-            "마우스 또는 키보드를 사용하면 화면이 복귀합니다.",
+            QtCore.QRect(left_margin, top_margin + 90, size.width() - left_margin * 2, 60),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            "이미지 불러오기를 실패했습니다.",
         )
+        painter.setFont(detail_font)
+        painter.drawText(
+            QtCore.QRect(left_margin, top_margin + 150, size.width() - left_margin * 2, 50),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            "해당 PC는 참고자료실 전용 도서 검색 PC입니다.",
+        )
+        painter.drawText(
+            QtCore.QRect(left_margin, top_margin + 200, size.width() - left_margin * 2, 50),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            "오늘도 방문해주셔서 감사합니다.",
+        )
+        divider_y = top_margin + 260
+        painter.setPen(QtGui.QPen(QtGui.QColor(90, 98, 110)))
+        painter.drawLine(left_margin, divider_y, size.width() - left_margin, divider_y)
         painter.end()
         return pixmap
 
@@ -3636,7 +3657,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = top_bar
         top_bar.setObjectName("TopBar")
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(24, 6, 24, 6)
+        top_layout.setContentsMargins(24, 4, 24, 4)
         top_layout.setSpacing(12)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setObjectName("MenuButton")
