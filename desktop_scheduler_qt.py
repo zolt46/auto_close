@@ -4721,7 +4721,10 @@ class App(QtWidgets.QApplication):
 
             cfg = {cfg.as_dict()!r}
             storage_dir = Path({str(self.cfg_mgr.storage_directory())!r})
-            cooldown = max(1.0, float(cfg.get("wakeup_chrome_relaunch_cooldown_sec", 10.0)))
+            try:
+                cooldown = max(1.0, float(sys.argv[-1]))
+            except Exception:
+                cooldown = max(1.0, float(cfg.get("wakeup_chrome_relaunch_cooldown_sec", 10.0)))
 
             def maybe_launch_audio():
                 if not cfg.get("wakeup_audio_enabled"):
@@ -4732,6 +4735,15 @@ class App(QtWidgets.QApplication):
                 profile_root = storage_dir / "chrome_profiles" / "audio"
                 if is_profile_running(profile_root):
                     return None
+                last_file = profile_root / "last_launch.txt"
+                now = time.time()
+                if last_file.exists():
+                    try:
+                        last_time = float(last_file.read_text().strip())
+                        if (now - last_time) < cooldown:
+                            return None
+                    except Exception:
+                        pass
                 url = with_autoplay(urls[0])
                 mode = (cfg.get("wakeup_audio_mode") or "normal").lower()
                 extra = [
@@ -4739,6 +4751,11 @@ class App(QtWidgets.QApplication):
                     "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
                 ]
                 launch(url, profile_root, mode == "fullscreen", mode == "kiosk", extra_args=extra)
+                try:
+                    last_file.parent.mkdir(parents=True, exist_ok=True)
+                    last_file.write_text(str(now))
+                except Exception:
+                    pass
 
             def maybe_launch_target():
                 if not cfg.get("wakeup_target_enabled"):
@@ -4749,8 +4766,22 @@ class App(QtWidgets.QApplication):
                 profile_root = storage_dir / "chrome_profiles" / "target"
                 if is_profile_running(profile_root):
                     return None
+                last_file = profile_root / "last_launch.txt"
+                now = time.time()
+                if last_file.exists():
+                    try:
+                        last_time = float(last_file.read_text().strip())
+                        if (now - last_time) < cooldown:
+                            return None
+                    except Exception:
+                        pass
                 mode = (cfg.get("wakeup_target_mode") or "normal").lower()
                 launch(target_url, profile_root, mode == "fullscreen", mode == "kiosk")
+                try:
+                    last_file.parent.mkdir(parents=True, exist_ok=True)
+                    last_file.write_text(str(now))
+                except Exception:
+                    pass
 
             maybe_launch_audio()
             maybe_launch_target()
@@ -4758,7 +4789,7 @@ class App(QtWidgets.QApplication):
             """
         ).strip()
         subprocess.Popen(
-            [sys.executable, "-c", worker_script],
+            [sys.executable, "-c", worker_script, str(cfg.wakeup_chrome_relaunch_cooldown_sec)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
