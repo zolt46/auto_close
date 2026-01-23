@@ -199,6 +199,7 @@ def launch_chrome_window(
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-background-mode",
         "--new-window",
     ]
     if extra_args:
@@ -4448,7 +4449,7 @@ class App(QtWidgets.QApplication):
         self._wakeup_check_lock = threading.Lock()
         self._wakeup_check_running = False
         self._schedule_boot_sequence()
-        self._show_user_login(initial=True)
+        QtCore.QTimer.singleShot(0, self.window._hide_to_tray)
 
     def is_already_running(self) -> bool:
         return getattr(self, "_already_running", False)
@@ -4465,6 +4466,9 @@ class App(QtWidgets.QApplication):
             lambda pw: verify_password(self.cfg_mgr.config.user_password_hash, pw),
             parent=self.window,
         )
+        prompt.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        prompt.raise_()
+        prompt.activateWindow()
         result = prompt.exec()
         self._login_dialog_open = False
         if result == QtWidgets.QDialog.Accepted:
@@ -4700,6 +4704,7 @@ class App(QtWidgets.QApplication):
                     f"--user-data-dir={{profile_dir}}",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    "--disable-background-mode",
                     "--new-window",
                 ]
                 if extra_args:
