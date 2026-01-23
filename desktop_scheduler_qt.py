@@ -3353,16 +3353,16 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         self.setStyleSheet("background-color: black;")
         self._pixmap: Optional[QtGui.QPixmap] = None
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         self.image_label = QtWidgets.QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.text_label = QtWidgets.QLabel("화면 보호 모드가 실행 중입니다.")
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setStyleSheet("color: white; font-size: 26px; font-weight: 600;")
-        layout.addStretch(1)
         layout.addWidget(self.image_label, 1)
         layout.addWidget(self.text_label, 0)
-        layout.addStretch(1)
         self.text_label.hide()
 
     def show_saver(self, image_path: Optional[Path], mode: str = "bundled") -> None:
@@ -3382,7 +3382,7 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
             self._pixmap = None
             self.image_label.clear()
             self.text_label.setText("이미지를 불러올 수 없어 기본 안내 화면을 표시합니다.")
-        self.text_label.show()
+            self.text_label.show()
         self.showFullScreen()
 
     def _build_generated_pixmap(self) -> Optional[QtGui.QPixmap]:
@@ -3403,7 +3403,11 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
     def _update_pixmap(self) -> None:
         if not self._pixmap:
             return
-        scaled = self._pixmap.scaled(self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        scaled = self._pixmap.scaled(
+            self.image_label.size(),
+            Qt.KeepAspectRatioByExpanding,
+            Qt.SmoothTransformation,
+        )
         self.image_label.setPixmap(scaled)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - UI 이벤트
@@ -3570,7 +3574,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QLabel#HeaderLogo {{
                 background: rgba(255, 255, 255, 0.78);
                 border-radius: 18px;
-                padding: 6px 18px;
+                padding: 0px;
                 border: 1px solid {outline_hex};
             }}
             QListWidget {{
@@ -3956,7 +3960,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if button and not button.isChecked():
             button.setChecked(True)
         if self.drawer.isVisible():
-            self.drawer.hide()
+            self._hide_drawer()
 
     def _preview_audio_for_today(self) -> Optional[str]:
         cfg = self.cfg_mgr.config
@@ -4179,10 +4183,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if pixmap is None:
                 pixmap = self._generate_header_logo()
                 tooltip = "기본 전원 로고가 적용되었습니다. 고급 설정에서 이미지를 교체할 수 있습니다."
-        target_size = self.logo_label.size()
+        target_size = self.logo_label.contentsRect().size()
         if target_size.width() <= 0 or target_size.height() <= 0:
             target_size = QtCore.QSize(320, 56)
-        scaled = pixmap.scaled(target_size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        scaled = pixmap.scaled(target_size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setScaledContents(True)
         self.logo_label.setToolTip(tooltip)
