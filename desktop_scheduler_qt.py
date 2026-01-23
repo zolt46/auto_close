@@ -185,6 +185,7 @@ def launch_chrome_window(
     *,
     fullscreen: bool = False,
     kiosk: bool = False,
+    extra_args: Optional[List[str]] = None,
 ) -> Optional[subprocess.Popen]:
     target = url.strip()
     if not target:
@@ -198,6 +199,8 @@ def launch_chrome_window(
         "--no-default-browser-check",
         "--new-window",
     ]
+    if extra_args:
+        args.extend(extra_args)
     if fullscreen:
         args.append("--start-fullscreen")
     if kiosk:
@@ -3482,6 +3485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tray: Optional[QtWidgets.QSystemTrayIcon] = None
         self._drawer_overlay: Optional[DrawerOverlay] = None
         self._drawer_open = False
+        self._header_logo_trimmed: Optional[QtGui.QPixmap] = None
         self._build_palette()
         initial_icon = self._brand_icon or create_tray_icon(self.cfg_mgr.config.theme_accent)
         self.setWindowIcon(initial_icon)
@@ -4166,29 +4170,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if pixmap is None:
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다."
-        def _trim_transparent(src: QtGui.QPixmap) -> QtGui.QPixmap:
-            image = src.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
-            width = image.width()
-            height = image.height()
-            min_x, min_y = width, height
-            max_x, max_y = 0, 0
-            has_alpha = False
-            for y in range(height):
-                for x in range(width):
-                    alpha = QtGui.qAlpha(image.pixel(x, y))
-                    if alpha > 0:
-                        has_alpha = True
-                        min_x = min(min_x, x)
-                        min_y = min(min_y, y)
-                        max_x = max(max_x, x)
-                        max_y = max(max_y, y)
-            if not has_alpha:
-                return src
-            if min_x > max_x or min_y > max_y:
-                return src
-            return src.copy(QtCore.QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
-
-        trimmed = _trim_transparent(pixmap)
+        if self._header_logo_trimmed is None:
+            self._header_logo_trimmed = self._trim_transparent(pixmap)
+        trimmed = self._header_logo_trimmed
         target_height = self.logo_label.height() or 88
         scaled = trimmed.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
@@ -4198,6 +4182,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.logo_container:
             self.logo_container.setFixedWidth(target_width)
         self.logo_label.setToolTip(tooltip)
+
+    @staticmethod
+    def _trim_transparent(src: QtGui.QPixmap) -> QtGui.QPixmap:
+        image = src.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
+        width = image.width()
+        height = image.height()
+        min_x, min_y = width, height
+        max_x, max_y = 0, 0
+        has_alpha = False
+        for y in range(height):
+            for x in range(width):
+                alpha = QtGui.qAlpha(image.pixel(x, y))
+                if alpha > 0:
+                    has_alpha = True
+                    min_x = min(min_x, x)
+                    min_y = min(min_y, y)
+                    max_x = max(max_x, x)
+                    max_y = max(max_y, y)
+        if not has_alpha:
+            return src
+        if min_x > max_x or min_y > max_y:
+            return src
+        return src.copy(QtCore.QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.page_title and event.type() == QtCore.QEvent.MouseButtonPress:
@@ -4426,6 +4433,7 @@ class App(QtWidgets.QApplication):
         self._last_audio_launch: Optional[float] = None
         self._last_target_launch: Optional[float] = None
         self._pending_target_timer: Optional[QtCore.QTimer] = None
+        self._profile_run_cache: Dict[str, Tuple[float, bool]] = {}
         self._show_user_login(initial=True)
         self._schedule_boot_sequence()
 
@@ -4605,6 +4613,7 @@ class App(QtWidgets.QApplication):
             profile_root,
             fullscreen=mode == "fullscreen",
             kiosk=mode == "kiosk",
+            extra_args=["--autoplay-policy=no-user-gesture-required"],
         )
         self._last_audio_launch = time.monotonic()
         self._ensure_target_on_top(cfg)
@@ -4630,6 +4639,7 @@ class App(QtWidgets.QApplication):
             kiosk=mode == "kiosk",
         )
         self._last_target_launch = time.monotonic()
+        self._ensure_target_on_top(cfg)
 
     def _pick_audio_url(self, cfg: SchedulerConfig) -> str:
         if not cfg.wakeup_audio_urls:
@@ -4650,6 +4660,11 @@ class App(QtWidgets.QApplication):
 
     def _is_chrome_profile_running(self, profile_root: Path) -> bool:
         profile_arg = f"--user-data-dir={profile_root}"
+        cached = self._profile_run_cache.get(profile_arg)
+        now = time.monotonic()
+        if cached and (now - cached[0]) < 3.0:
+            return cached[1]
+        running = False
         for proc in psutil.process_iter(["name", "cmdline"]):
             try:
                 name = (proc.info.get("name") or "").lower()
@@ -4657,10 +4672,12 @@ class App(QtWidgets.QApplication):
                     continue
                 cmdline = proc.info.get("cmdline") or []
                 if profile_arg in cmdline:
-                    return True
+                    running = True
+                    break
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        return False
+        self._profile_run_cache[profile_arg] = (now, running)
+        return running
 
     def _find_chrome_profile_pid(self, profile_root: Path) -> Optional[int]:
         profile_arg = f"--user-data-dir={profile_root}"
