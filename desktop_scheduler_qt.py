@@ -4164,8 +4164,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if pixmap is None:
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다."
+        def _trim_transparent(src: QtGui.QPixmap) -> QtGui.QPixmap:
+            image = src.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
+            width = image.width()
+            height = image.height()
+            min_x, min_y = width, height
+            max_x, max_y = 0, 0
+            has_alpha = False
+            for y in range(height):
+                for x in range(width):
+                    alpha = QtGui.qAlpha(image.pixel(x, y))
+                    if alpha > 0:
+                        has_alpha = True
+                        min_x = min(min_x, x)
+                        min_y = min(min_y, y)
+                        max_x = max(max_x, x)
+                        max_y = max(max_y, y)
+            if not has_alpha:
+                return src
+            if min_x > max_x or min_y > max_y:
+                return src
+            return src.copy(QtCore.QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+
+        trimmed = _trim_transparent(pixmap)
         target_height = self.logo_label.height() or 88
-        scaled = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
+        scaled = trimmed.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setScaledContents(False)
         target_width = max(1, scaled.width())
