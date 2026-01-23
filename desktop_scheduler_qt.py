@@ -3623,6 +3623,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: {header_bg};
                 border-bottom: 1px solid {outline_hex};
             }}
+            QFrame#TopBar QPushButton {{
+                padding: 6px 12px;
+            }}
         """
         )
 
@@ -3657,7 +3660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = top_bar
         top_bar.setObjectName("TopBar")
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(24, 4, 24, 4)
+        top_layout.setContentsMargins(24, 2, 24, 2)
         top_layout.setSpacing(12)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setObjectName("MenuButton")
@@ -3683,7 +3686,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        self.logo_label.setFixedHeight(96)
+        self.logo_label.setFixedHeight(88)
         self.logo_label.setMinimumWidth(0)
         self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.logo_label.setCursor(Qt.PointingHandCursor)
@@ -4161,7 +4164,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if pixmap is None:
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다."
-        target_height = self.logo_label.height() or 96
+        target_height = self.logo_label.height() or 88
         scaled = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setScaledContents(False)
@@ -4176,7 +4179,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._locked or self._mode == "admin":
                 return super().eventFilter(obj, event)
             if isinstance(event, QtGui.QMouseEvent) and event.button() == Qt.LeftButton:
-                if not self._secret_timer.isValid() or self._secret_timer.elapsed() > 2500:
+                if not self._secret_timer.isValid() or self._secret_timer.elapsed() > 4500:
                     self._secret_clicks = 0
                     self._secret_timer.start()
                 self._secret_clicks += 1
