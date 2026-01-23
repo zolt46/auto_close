@@ -498,6 +498,7 @@ def resolve_screensaver_image(cfg: SchedulerConfig) -> Tuple[Optional[Path], str
         candidate = Path(cfg.wakeup_image_path).expanduser()
         if candidate.exists():
             return candidate, mode
+        return None, "generated"
     if mode == "generated":
         return None, mode
     if DEFAULT_SAVER_IMAGE.exists():
@@ -995,35 +996,52 @@ class StyledToggle(QtWidgets.QCheckBox):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("StyledToggle")
         self.setCursor(Qt.PointingHandCursor)
         self.setTristate(False)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setFixedHeight(30)
-        self.setStyleSheet(
-            """
-            QCheckBox {
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 50px;
-                height: 26px;
-                border-radius: 13px;
-                border: 2px solid #90A4C5;
-                background-color: #E3EAF6;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #3461C1;
-                border-color: #244B9A;
-            }
-            QCheckBox::indicator:unchecked {
-                background-color: #E3EAF6;
-            }
-            QCheckBox::indicator:disabled {
-                background-color: #C7CFDD;
-                border-color: #A5B1C8;
-            }
-            """
-        )
+        self.setFixedSize(54, 30)
+        self.setText("")
+
+    def sizeHint(self) -> QtCore.QSize:  # pragma: no cover - UI hint
+        return QtCore.QSize(54, 30)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # pragma: no cover - UI 이벤트
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect().adjusted(2, 2, -2, -2)
+        radius = rect.height() / 2
+        palette = self.palette()
+        accent = palette.color(QPalette.Highlight)
+        border = palette.color(QPalette.Mid)
+        track_off = palette.color(QPalette.Base)
+        knob_color = palette.color(QPalette.HighlightedText)
+        if not self.isEnabled():
+            accent = palette.color(QPalette.Midlight)
+            border = palette.color(QPalette.Dark)
+            track_off = palette.color(QPalette.Midlight)
+            knob_color = palette.color(QPalette.WindowText)
+        track_color = accent if self.isChecked() else track_off
+        painter.setPen(QtGui.QPen(border, 1.5))
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(rect, radius, radius)
+        knob_size = rect.height() - 6
+        knob_y = rect.top() + 3
+        if self.isChecked():
+            knob_x = rect.right() - knob_size - 3
+        else:
+            knob_x = rect.left() + 3
+        knob_rect = QtCore.QRectF(knob_x, knob_y, knob_size, knob_size)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(knob_color)
+        painter.drawEllipse(knob_rect)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - UI 이벤트
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 def create_toggle_field(text: str, toggle: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
@@ -1801,19 +1819,6 @@ class SettingsPanel(FancyCard):
         path_change_btn.setCursor(Qt.PointingHandCursor)
         path_row.addWidget(self.config_path_label, 1)
         path_row.addWidget(path_change_btn)
-        logo_row = QtWidgets.QHBoxLayout()
-        self.logo_path_label = QtWidgets.QLabel()
-        self.logo_path_label.setWordWrap(True)
-        self.logo_path_label.setProperty("role", "subtitle")
-        self.logo_choose_btn = QtWidgets.QPushButton("로고 선택")
-        self.logo_clear_btn = QtWidgets.QPushButton("기본값")
-        for btn in (self.logo_choose_btn, self.logo_clear_btn):
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setEnabled(True)
-            btn.setMinimumWidth(90)
-        logo_row.addWidget(self.logo_path_label, 1)
-        logo_row.addWidget(self.logo_choose_btn)
-        logo_row.addWidget(self.logo_clear_btn)
         password_row = QtWidgets.QHBoxLayout()
         self.user_password_btn = QtWidgets.QPushButton("일반 비밀번호 변경")
         self.admin_password_btn = QtWidgets.QPushButton("관리자 비밀번호 변경")
@@ -1829,7 +1834,6 @@ class SettingsPanel(FancyCard):
         form.addRow("시작 프로그램 등록", create_toggle_field("사용", self.startup_toggle))
         form.addRow("테마", self.accent_btn)
         form.addRow("설정 저장 위치", path_row)
-        form.addRow("상단 로고", logo_row)
         form.addRow("비밀번호 관리", password_row)
         outer.addLayout(form)
         hosts_group = QtWidgets.QGroupBox("원격 PC 목록")
@@ -1881,18 +1885,6 @@ class SettingsPanel(FancyCard):
         self.cfg_mgr.storage_dir_changed.connect(self._on_storage_dir_changed)
         self.user_password_btn.clicked.connect(self._change_user_password)
         self.admin_password_btn.clicked.connect(self._change_admin_password)
-        choose_handler = getattr(self, "_choose_logo_image", None)
-        clear_handler = getattr(self, "_clear_logo_image", None)
-        if callable(choose_handler):
-            self.logo_choose_btn.clicked.connect(choose_handler)
-        else:  # pragma: no cover - 안전장치
-            self.logo_choose_btn.setEnabled(False)
-            self.logo_choose_btn.setToolTip("로고 선택 기능을 초기화할 수 없습니다.")
-        if callable(clear_handler):
-            self.logo_clear_btn.clicked.connect(clear_handler)
-        else:  # pragma: no cover - 안전장치
-            self.logo_clear_btn.setEnabled(False)
-            self.logo_clear_btn.setToolTip("로고 초기화 기능을 사용할 수 없습니다.")
         self.test_completed.connect(self._on_test_result)
         self.log_generated.connect(self._append_test_log)
         self._targets_timer = QtCore.QTimer(self)
@@ -1901,7 +1893,6 @@ class SettingsPanel(FancyCard):
         self._targets_timer.timeout.connect(self._persist_targets)
         self.target_edit.textChanged.connect(lambda _: self._targets_timer.start())
         self._loading_hosts = False
-        self._update_logo_summary(self.cfg_mgr.config.header_logo_path)
         self._load_hosts()
         self._log_dialog: Optional[TerminalLogDialog] = None
 
@@ -1947,7 +1938,6 @@ class SettingsPanel(FancyCard):
         self.delay_spin.blockSignals(False)
         self._load_hosts()
         self._update_config_path_label()
-        self._update_logo_summary(cfg.header_logo_path)
 
     def _load_hosts(self) -> None:
         self._loading_hosts = True
@@ -2206,19 +2196,6 @@ class SettingsPanel(FancyCard):
         self.config_path_label.setText(target)
         self.config_path_label.setToolTip(target)
 
-    def _update_logo_summary(self, path: Optional[str]) -> None:
-        if path:
-            name = Path(path).name
-            exists = Path(path).exists()
-            status = "사용 중" if exists else "확인 필요"
-            text = f"{status}: {name}"
-            tooltip = path
-        else:
-            text = "기본 로고 사용 중 (자동 생성)"
-            tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
-        self.logo_path_label.setText(text)
-        self.logo_path_label.setToolTip(tooltip)
-
     def _change_user_password(self) -> None:
         dialog = PasswordChangeDialog("일반 사용자 비밀번호 변경", require_current=False, parent=self)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
@@ -2339,10 +2316,15 @@ class WakeupSettingsPanel(FancyCard):
     def _update_saver_path_label(self) -> None:
         cfg = self.cfg_mgr.config
         mode = (cfg.wakeup_screensaver_image_mode or "bundled").lower()
-        if mode == "custom" and cfg.wakeup_screensaver_image_path:
+        is_custom = mode == "custom"
+        if is_custom and cfg.wakeup_screensaver_image_path:
             self.saver_path_label.setText(cfg.wakeup_screensaver_image_path)
+        elif is_custom:
+            self.saver_path_label.setText("이미지를 선택하세요.")
         else:
-            self.saver_path_label.setText(str(DEFAULT_SAVER_IMAGE) if DEFAULT_SAVER_IMAGE.exists() else "기본 이미지 없음")
+            self.saver_path_label.setText("")
+        self.saver_choose_btn.setEnabled(is_custom)
+        self.saver_clear_btn.setEnabled(True)
 
     def _choose_saver_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2397,36 +2379,6 @@ class WakeupSettingsPanel(FancyCard):
                 self.saver_mode_combo.blockSignals(False)
                 break
         self._update_saver_path_label()
-
-    def _choose_logo_image(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "로고 이미지 선택",
-            str(Path.home()),
-            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif)",
-        )
-        if not path:
-            return
-
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.header_logo_path = path
-
-        self.cfg_mgr.update(updater)
-        self._update_logo_summary(path)
-        show_success_message(self, "상단 로고", "선택한 이미지가 상단 바에 적용되었습니다.")
-
-    def _clear_logo_image(self) -> None:
-        if not self.cfg_mgr.config.header_logo_path:
-            self._update_logo_summary(None)
-            return
-
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.header_logo_path = None
-
-        self.cfg_mgr.update(updater)
-        self._update_logo_summary(None)
-        show_info_message(self, "상단 로고", "기본 로고로 돌아갔습니다.")
-
 
 class WakeupSettingsPanel(FancyCard):
     def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
@@ -2578,12 +2530,17 @@ class WakeupSettingsPanel(FancyCard):
     def _update_saver_path_label(self) -> None:
         cfg = self.cfg_mgr.config
         mode = (cfg.wakeup_saver_image_mode or "bundled").lower()
-        if mode == "path" and cfg.wakeup_image_path:
+        is_custom = mode == "path"
+        if is_custom and cfg.wakeup_image_path:
             self.saver_path_label.setText(cfg.wakeup_image_path)
+        elif is_custom:
+            self.saver_path_label.setText("이미지를 선택하세요.")
         elif mode == "generated":
             self.saver_path_label.setText("안내 문구 자동 생성")
         else:
-            self.saver_path_label.setText(str(DEFAULT_SAVER_IMAGE) if DEFAULT_SAVER_IMAGE.exists() else "기본 이미지 없음")
+            self.saver_path_label.setText("")
+        self.saver_choose_btn.setEnabled(is_custom)
+        self.saver_clear_btn.setEnabled(True)
 
     def _choose_saver_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -3353,16 +3310,17 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         self.setStyleSheet("background-color: black;")
         self._pixmap: Optional[QtGui.QPixmap] = None
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         self.image_label = QtWidgets.QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.image_label.setScaledContents(False)
         self.text_label = QtWidgets.QLabel("화면 보호 모드가 실행 중입니다.")
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setStyleSheet("color: white; font-size: 26px; font-weight: 600;")
-        layout.addStretch(1)
         layout.addWidget(self.image_label, 1)
         layout.addWidget(self.text_label, 0)
-        layout.addStretch(1)
         self.text_label.hide()
 
     def show_saver(self, image_path: Optional[Path], mode: str = "bundled") -> None:
@@ -3372,8 +3330,9 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         pixmap = None
         if image_path is not None:
             pixmap = QtGui.QPixmap(str(image_path))
-        elif mode == "generated":
+        if pixmap is None or pixmap.isNull():
             pixmap = self._build_generated_pixmap()
+            mode = "generated"
         if pixmap is not None and not pixmap.isNull():
             self._pixmap = pixmap
             self.text_label.hide()
@@ -3382,7 +3341,7 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
             self._pixmap = None
             self.image_label.clear()
             self.text_label.setText("이미지를 불러올 수 없어 기본 안내 화면을 표시합니다.")
-        self.text_label.show()
+            self.text_label.show()
         self.showFullScreen()
 
     def _build_generated_pixmap(self) -> Optional[QtGui.QPixmap]:
@@ -3394,16 +3353,27 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         painter = QtGui.QPainter(pixmap)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.setPen(QtGui.QColor("white"))
-        font = _build_ui_font(28, QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "화면 보호 모드가 실행 중입니다.")
+        title_font = _build_ui_font(34, QFont.Weight.Bold)
+        subtitle_font = _build_ui_font(20, QFont.Weight.Medium)
+        painter.setFont(title_font)
+        painter.drawText(pixmap.rect().adjusted(0, -40, 0, 0), Qt.AlignCenter, "화면 보호 모드")
+        painter.setFont(subtitle_font)
+        painter.drawText(
+            pixmap.rect().adjusted(0, 40, 0, 0),
+            Qt.AlignCenter,
+            "마우스 또는 키보드를 사용하면 화면이 복귀합니다.",
+        )
         painter.end()
         return pixmap
 
     def _update_pixmap(self) -> None:
         if not self._pixmap:
             return
-        scaled = self._pixmap.scaled(self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        scaled = self._pixmap.scaled(
+            self.image_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
         self.image_label.setPixmap(scaled)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - UI 이벤트
@@ -3568,10 +3538,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 text-decoration: underline;
             }}
             QLabel#HeaderLogo {{
-                background: rgba(255, 255, 255, 0.78);
-                border-radius: 18px;
-                padding: 6px 18px;
-                border: 1px solid {outline_hex};
+                background: transparent;
+                border-radius: 0px;
+                padding: 0px;
+                border: none;
             }}
             QListWidget {{
                 background: #FFFFFF;
@@ -3666,7 +3636,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = top_bar
         top_bar.setObjectName("TopBar")
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(24, 18, 24, 18)
+        top_layout.setContentsMargins(24, 6, 24, 6)
         top_layout.setSpacing(12)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setObjectName("MenuButton")
@@ -3682,9 +3652,9 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.addStretch(1)
         self.logo_container = QtWidgets.QWidget()
         self.logo_container.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred
         )
-        self.logo_container.setMinimumWidth(360)
+        self.logo_container.setMinimumWidth(0)
         logo_layout = QtWidgets.QHBoxLayout(self.logo_container)
         logo_layout.setContentsMargins(0, 0, 0, 0)
         logo_layout.setSpacing(0)
@@ -3692,9 +3662,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        self.logo_label.setFixedHeight(64)
-        self.logo_label.setMinimumWidth(280)
-        self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.logo_label.setFixedHeight(96)
+        self.logo_label.setMinimumWidth(0)
+        self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.logo_label.setCursor(Qt.PointingHandCursor)
         logo_layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
         logo_layout.addStretch(1)
@@ -3956,7 +3926,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if button and not button.isChecked():
             button.setChecked(True)
         if self.drawer.isVisible():
-            self.drawer.hide()
+            self._hide_drawer()
 
     def _preview_audio_for_today(self) -> Optional[str]:
         cfg = self.cfg_mgr.config
@@ -4162,29 +4132,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_header_logo(self, path: Optional[str]) -> None:
         pixmap: Optional[QtGui.QPixmap] = None
-        tooltip = "상단 바에 표시할 로고 이미지를 고급 설정에서 선택하세요."
-        if path:
-            candidate_path = Path(path)
-            if candidate_path.exists():
-                candidate = QtGui.QPixmap(str(candidate_path))
-                if not candidate.isNull():
-                    pixmap = candidate
-                    tooltip = str(candidate_path)
+        tooltip = "기본 로고(topbar_logo.png)가 적용되었습니다."
+        if DEFAULT_HEADER_LOGO.exists():
+            candidate = QtGui.QPixmap(str(DEFAULT_HEADER_LOGO))
+            if not candidate.isNull():
+                pixmap = candidate
         if pixmap is None:
-            if DEFAULT_HEADER_LOGO.exists():
-                candidate = QtGui.QPixmap(str(DEFAULT_HEADER_LOGO))
-                if not candidate.isNull():
-                    pixmap = candidate
-                    tooltip = "기본 로고(topbar_logo.png)가 적용되었습니다."
-            if pixmap is None:
-                pixmap = self._generate_header_logo()
-                tooltip = "기본 전원 로고가 적용되었습니다. 고급 설정에서 이미지를 교체할 수 있습니다."
-        target_size = self.logo_label.size()
-        if target_size.width() <= 0 or target_size.height() <= 0:
-            target_size = QtCore.QSize(320, 56)
-        scaled = pixmap.scaled(target_size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            pixmap = self._generate_header_logo()
+            tooltip = "기본 전원 로고가 적용되었습니다."
+        target_height = self.logo_label.height() or 96
+        scaled = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
-        self.logo_label.setScaledContents(True)
+        self.logo_label.setScaledContents(False)
+        target_width = max(1, scaled.width())
+        self.logo_label.setFixedWidth(target_width)
+        if self.logo_container:
+            self.logo_container.setFixedWidth(target_width)
         self.logo_label.setToolTip(tooltip)
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
@@ -4214,6 +4177,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_from_tray()
 
     def _on_tray_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
+        if QtWidgets.QApplication.mouseButtons() & Qt.RightButton:
+            return
         if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
             self._handle_tray_show()
 
@@ -4378,6 +4343,14 @@ class MainWindow(QtWidgets.QMainWindow):
 class App(QtWidgets.QApplication):
     def __init__(self, argv: List[str]) -> None:
         super().__init__(argv)
+        self._instance_guard = QtCore.QSharedMemory(f"{ORGANIZATION_DOMAIN}.{APP_NAME}")
+        if self._instance_guard.attach():
+            self._already_running = True
+            return
+        if not self._instance_guard.create(1):
+            self._already_running = True
+            return
+        self._already_running = False
         QtCore.QCoreApplication.setApplicationName(APP_NAME)
         QtCore.QCoreApplication.setApplicationVersion(APP_VERSION)
         QtCore.QCoreApplication.setOrganizationName(ORGANIZATION_NAME)
@@ -4406,6 +4379,9 @@ class App(QtWidgets.QApplication):
         self._pending_target_timer: Optional[QtCore.QTimer] = None
         self._show_user_login(initial=True)
         self._schedule_boot_sequence()
+
+    def is_already_running(self) -> bool:
+        return getattr(self, "_already_running", False)
 
     def _show_user_login(self, *, initial: bool) -> None:
         if not self.window.is_locked():
@@ -4626,4 +4602,6 @@ class App(QtWidgets.QApplication):
 
 if __name__ == "__main__":
     app = App(sys.argv)
+    if app.is_already_running():
+        sys.exit(0)
     sys.exit(app.exec())
