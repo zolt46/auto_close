@@ -4449,6 +4449,9 @@ class App(QtWidgets.QApplication):
     def is_already_running(self) -> bool:
         return getattr(self, "_already_running", False)
 
+    def is_already_running(self) -> bool:
+        return getattr(self, "_already_running", False)
+
     def _show_user_login(self, *, initial: bool) -> None:
         if not self.window.is_locked():
             return
