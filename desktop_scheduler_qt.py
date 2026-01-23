@@ -1035,6 +1035,13 @@ class StyledToggle(QtWidgets.QCheckBox):
         painter.setBrush(knob_color)
         painter.drawEllipse(knob_rect)
 
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - UI 이벤트
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 def create_toggle_field(text: str, toggle: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
     wrapper = QtWidgets.QWidget()
@@ -2316,7 +2323,7 @@ class WakeupSettingsPanel(FancyCard):
         else:
             self.saver_path_label.setText("")
         self.saver_choose_btn.setEnabled(is_custom)
-        self.saver_clear_btn.setEnabled(is_custom)
+        self.saver_clear_btn.setEnabled(True)
 
     def _choose_saver_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2532,7 +2539,7 @@ class WakeupSettingsPanel(FancyCard):
         else:
             self.saver_path_label.setText("")
         self.saver_choose_btn.setEnabled(is_custom)
-        self.saver_clear_btn.setEnabled(is_custom)
+        self.saver_clear_btn.setEnabled(True)
 
     def _choose_saver_image(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -3522,10 +3529,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 text-decoration: underline;
             }}
             QLabel#HeaderLogo {{
-                background: rgba(255, 255, 255, 0.78);
-                border-radius: 18px;
+                background: transparent;
+                border-radius: 0px;
                 padding: 0px;
-                border: 1px solid {outline_hex};
+                border: none;
             }}
             QListWidget {{
                 background: #FFFFFF;
@@ -3646,7 +3653,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        self.logo_label.setFixedHeight(64)
+        self.logo_label.setFixedHeight(160)
         self.logo_label.setMinimumWidth(0)
         self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.logo_label.setCursor(Qt.PointingHandCursor)
@@ -4124,7 +4131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if pixmap is None:
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다."
-        target_height = self.logo_label.height() or 64
+        target_height = self.logo_label.height() or 160
         scaled = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setScaledContents(False)
