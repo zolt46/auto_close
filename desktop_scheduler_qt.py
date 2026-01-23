@@ -36,6 +36,7 @@ import threading
 import time
 import urllib.parse
 import argparse
+import textwrap
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -4630,12 +4631,129 @@ class App(QtWidgets.QApplication):
 
         def worker(snapshot: SchedulerConfig) -> None:
             try:
-                self._ensure_window_running(snapshot)
+                self._run_wakeup_worker(snapshot)
             finally:
                 self._wakeup_check_running = False
                 self._wakeup_check_lock.release()
 
         threading.Thread(target=worker, args=(cfg,), daemon=True).start()
+
+    def _run_wakeup_worker(self, cfg: SchedulerConfig) -> None:
+        worker_script = textwrap.dedent(
+            f"""
+            import time
+            import sys
+            from pathlib import Path
+            import psutil
+            import subprocess
+            import urllib.parse
+
+            def find_chrome_executable() -> str:
+                candidates = {CHROME_CANDIDATES!r}
+                for candidate in candidates:
+                    if Path(candidate).exists():
+                        return candidate
+                fallback = None
+                for name in ("chrome", "chrome.exe"):
+                    fallback = shutil.which(name)
+                    if fallback:
+                        break
+                return fallback or "chrome"
+
+            def is_profile_running(profile_root: Path) -> bool:
+                profile_arg = f"--user-data-dir={{profile_root}}"
+                for proc in psutil.process_iter(["name", "cmdline"]):
+                    try:
+                        name = (proc.info.get("name") or "").lower()
+                        if "chrome" not in name:
+                            continue
+                        cmdline = proc.info.get("cmdline") or []
+                        if profile_arg in cmdline:
+                            return True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                return False
+
+            def with_autoplay(url: str) -> str:
+                parsed = urllib.parse.urlparse(url)
+                if not parsed.scheme or not parsed.netloc:
+                    return url
+                host = parsed.netloc.lower()
+                if "youtube" not in host and "youtu.be" not in host:
+                    return url
+                query = urllib.parse.parse_qs(parsed.query)
+                query.setdefault("autoplay", ["1"])
+                new_query = urllib.parse.urlencode(query, doseq=True)
+                return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+            def launch(url: str, profile_dir: Path, fullscreen: bool, kiosk: bool, extra_args=None):
+                target = url.strip()
+                if not target:
+                    return None
+                chrome = find_chrome_executable()
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                args = [
+                    chrome,
+                    f"--user-data-dir={{profile_dir}}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--new-window",
+                ]
+                if extra_args:
+                    args.extend(extra_args)
+                if fullscreen:
+                    args.append("--start-fullscreen")
+                if kiosk:
+                    args.append("--kiosk")
+                args.append(target)
+                try:
+                    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    return None
+
+            cfg = {cfg.to_dict()!r}
+            storage_dir = Path({str(self.cfg_mgr.storage_directory())!r})
+            cooldown = max(1.0, float(cfg.get("wakeup_chrome_relaunch_cooldown_sec", 10.0)))
+
+            def maybe_launch_audio():
+                if not cfg.get("wakeup_audio_enabled"):
+                    return None
+                urls = cfg.get("wakeup_audio_urls") or []
+                if not urls:
+                    return None
+                profile_root = storage_dir / "chrome_profiles" / "audio"
+                if is_profile_running(profile_root):
+                    return None
+                url = with_autoplay(urls[0])
+                mode = (cfg.get("wakeup_audio_mode") or "normal").lower()
+                extra = [
+                    "--autoplay-policy=no-user-gesture-required",
+                    "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
+                ]
+                launch(url, profile_root, mode == "fullscreen", mode == "kiosk", extra_args=extra)
+
+            def maybe_launch_target():
+                if not cfg.get("wakeup_target_enabled"):
+                    return None
+                target_url = (cfg.get("wakeup_target_url") or "").strip()
+                if not target_url:
+                    return None
+                profile_root = storage_dir / "chrome_profiles" / "target"
+                if is_profile_running(profile_root):
+                    return None
+                mode = (cfg.get("wakeup_target_mode") or "normal").lower()
+                launch(target_url, profile_root, mode == "fullscreen", mode == "kiosk")
+
+            maybe_launch_audio()
+            maybe_launch_target()
+            time.sleep(0.05)
+            """
+        ).strip()
+        subprocess.Popen(
+            [sys.executable, "-c", worker_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def _launch_audio_window(self, cfg: SchedulerConfig) -> None:
         if not cfg.wakeup_audio_enabled or not cfg.wakeup_audio_urls:
