@@ -3627,7 +3627,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = top_bar
         top_bar.setObjectName("TopBar")
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(24, 18, 24, 18)
+        top_layout.setContentsMargins(24, 8, 24, 8)
         top_layout.setSpacing(12)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setObjectName("MenuButton")
@@ -4168,6 +4168,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_from_tray()
 
     def _on_tray_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
+        if QtWidgets.QApplication.mouseButtons() & Qt.RightButton:
+            return
         if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
             self._handle_tray_show()
 
