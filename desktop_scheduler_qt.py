@@ -4273,6 +4273,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        self.setWindowState(self.windowState() | Qt.WindowActive)
+        QtCore.QTimer.singleShot(0, self.activateWindow)
 
     def _hide_to_tray(self, *, notify: bool = False) -> None:
         self._set_taskbar_visibility(False)
@@ -4647,6 +4649,7 @@ class App(QtWidgets.QApplication):
             import psutil
             import subprocess
             import urllib.parse
+            import shutil
 
             def find_chrome_executable() -> str:
                 candidates = {CHROME_CANDIDATES!r}
@@ -4711,7 +4714,7 @@ class App(QtWidgets.QApplication):
                 except Exception:
                     return None
 
-            cfg = {cfg.to_dict()!r}
+            cfg = {cfg.as_dict()!r}
             storage_dir = Path({str(self.cfg_mgr.storage_directory())!r})
             cooldown = max(1.0, float(cfg.get("wakeup_chrome_relaunch_cooldown_sec", 10.0)))
 
