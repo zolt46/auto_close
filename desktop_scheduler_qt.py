@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import atexit
+import ctypes
 import hashlib
 import html
 import json
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -4595,6 +4597,7 @@ class App(QtWidgets.QApplication):
         url = self._pick_audio_url(cfg)
         if not url:
             return
+        url = self._with_autoplay(url)
         mode = (cfg.wakeup_audio_mode or "normal").lower()
         profile_root = self.cfg_mgr.storage_directory() / "chrome_profiles" / "audio"
         self._audio_process = launch_chrome_window(
@@ -4604,6 +4607,7 @@ class App(QtWidgets.QApplication):
             kiosk=mode == "kiosk",
         )
         self._last_audio_launch = time.monotonic()
+        self._ensure_target_on_top(cfg)
 
     def _schedule_target_window(self, cfg: SchedulerConfig) -> None:
         if not cfg.wakeup_target_enabled or not (cfg.wakeup_target_url or "").strip():
@@ -4632,16 +4636,90 @@ class App(QtWidgets.QApplication):
             return ""
         return random.choice(cfg.wakeup_audio_urls)
 
+    def _with_autoplay(self, url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return url
+        host = parsed.netloc.lower()
+        if "youtube" not in host and "youtu.be" not in host:
+            return url
+        query = urllib.parse.parse_qs(parsed.query)
+        query.setdefault("autoplay", ["1"])
+        new_query = urllib.parse.urlencode(query, doseq=True)
+        return urllib.parse.urlunparse(parsed._replace(query=new_query))
+
+    def _is_chrome_profile_running(self, profile_root: Path) -> bool:
+        profile_arg = f"--user-data-dir={profile_root}"
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if "chrome" not in name:
+                    continue
+                cmdline = proc.info.get("cmdline") or []
+                if profile_arg in cmdline:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return False
+
+    def _find_chrome_profile_pid(self, profile_root: Path) -> Optional[int]:
+        profile_arg = f"--user-data-dir={profile_root}"
+        for proc in psutil.process_iter(["name", "cmdline", "pid"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if "chrome" not in name:
+                    continue
+                cmdline = proc.info.get("cmdline") or []
+                if profile_arg in cmdline:
+                    return int(proc.info.get("pid") or 0) or None
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return None
+
+    def _raise_chrome_profile(self, profile_root: Path) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        pid = self._find_chrome_profile_pid(profile_root)
+        if not pid:
+            return
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        target_pid = ctypes.c_ulong(pid)
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def enum_proc(hwnd, _: int) -> bool:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid_ref = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_ref))
+            if pid_ref.value == target_pid.value:
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.SetForegroundWindow(hwnd)
+                return False
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(enum_proc), 0)
+
+    def _ensure_target_on_top(self, cfg: SchedulerConfig) -> None:
+        if not cfg.wakeup_target_enabled or not (cfg.wakeup_target_url or "").strip():
+            return
+        profile_root = self.cfg_mgr.storage_directory() / "chrome_profiles" / "target"
+        if not self._is_chrome_profile_running(profile_root):
+            return
+        QtCore.QTimer.singleShot(800, lambda: self._raise_chrome_profile(profile_root))
+
     def _ensure_window_running(self, cfg: SchedulerConfig) -> None:
         cooldown = max(1.0, float(cfg.wakeup_chrome_relaunch_cooldown_sec))
         now = time.monotonic()
         if cfg.wakeup_audio_enabled and cfg.wakeup_audio_urls:
-            if self._audio_process and self._audio_process.poll() is None:
+            audio_profile = self.cfg_mgr.storage_directory() / "chrome_profiles" / "audio"
+            if self._is_chrome_profile_running(audio_profile):
                 pass
             elif self._last_audio_launch is None or (now - self._last_audio_launch) >= cooldown:
                 self._launch_audio_window(cfg)
         if cfg.wakeup_target_enabled and (cfg.wakeup_target_url or "").strip():
-            if self._target_process and self._target_process.poll() is None:
+            target_profile = self.cfg_mgr.storage_directory() / "chrome_profiles" / "target"
+            if self._is_chrome_profile_running(target_profile):
                 pass
             elif self._last_target_launch is None or (now - self._last_target_launch) >= cooldown:
                 self._launch_target_window(cfg)
