@@ -498,6 +498,7 @@ def resolve_screensaver_image(cfg: SchedulerConfig) -> Tuple[Optional[Path], str
         candidate = Path(cfg.wakeup_image_path).expanduser()
         if candidate.exists():
             return candidate, mode
+        return None, "generated"
     if mode == "generated":
         return None, mode
     if DEFAULT_SAVER_IMAGE.exists():
@@ -3329,8 +3330,9 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         pixmap = None
         if image_path is not None:
             pixmap = QtGui.QPixmap(str(image_path))
-        elif mode == "generated":
+        if pixmap is None or pixmap.isNull():
             pixmap = self._build_generated_pixmap()
+            mode = "generated"
         if pixmap is not None and not pixmap.isNull():
             self._pixmap = pixmap
             self.text_label.hide()
@@ -3351,9 +3353,16 @@ class ScreenSaverOverlay(QtWidgets.QWidget):
         painter = QtGui.QPainter(pixmap)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.setPen(QtGui.QColor("white"))
-        font = _build_ui_font(28, QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "화면 보호 모드가 실행 중입니다.")
+        title_font = _build_ui_font(34, QFont.Weight.Bold)
+        subtitle_font = _build_ui_font(20, QFont.Weight.Medium)
+        painter.setFont(title_font)
+        painter.drawText(pixmap.rect().adjusted(0, -40, 0, 0), Qt.AlignCenter, "화면 보호 모드")
+        painter.setFont(subtitle_font)
+        painter.drawText(
+            pixmap.rect().adjusted(0, 40, 0, 0),
+            Qt.AlignCenter,
+            "마우스 또는 키보드를 사용하면 화면이 복귀합니다.",
+        )
         painter.end()
         return pixmap
 
@@ -3627,7 +3636,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = top_bar
         top_bar.setObjectName("TopBar")
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(24, 8, 24, 8)
+        top_layout.setContentsMargins(24, 6, 24, 6)
         top_layout.setSpacing(12)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setObjectName("MenuButton")
@@ -3653,7 +3662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        self.logo_label.setFixedHeight(160)
+        self.logo_label.setFixedHeight(96)
         self.logo_label.setMinimumWidth(0)
         self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.logo_label.setCursor(Qt.PointingHandCursor)
@@ -4131,7 +4140,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if pixmap is None:
             pixmap = self._generate_header_logo()
             tooltip = "기본 전원 로고가 적용되었습니다."
-        target_height = self.logo_label.height() or 160
+        target_height = self.logo_label.height() or 96
         scaled = pixmap.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
         self.logo_label.setScaledContents(False)
@@ -4334,6 +4343,14 @@ class MainWindow(QtWidgets.QMainWindow):
 class App(QtWidgets.QApplication):
     def __init__(self, argv: List[str]) -> None:
         super().__init__(argv)
+        self._instance_guard = QtCore.QSharedMemory(f"{ORGANIZATION_DOMAIN}.{APP_NAME}")
+        if self._instance_guard.attach():
+            self._already_running = True
+            return
+        if not self._instance_guard.create(1):
+            self._already_running = True
+            return
+        self._already_running = False
         QtCore.QCoreApplication.setApplicationName(APP_NAME)
         QtCore.QCoreApplication.setApplicationVersion(APP_VERSION)
         QtCore.QCoreApplication.setOrganizationName(ORGANIZATION_NAME)
@@ -4362,6 +4379,9 @@ class App(QtWidgets.QApplication):
         self._pending_target_timer: Optional[QtCore.QTimer] = None
         self._show_user_login(initial=True)
         self._schedule_boot_sequence()
+
+    def is_already_running(self) -> bool:
+        return getattr(self, "_already_running", False)
 
     def _show_user_login(self, *, initial: bool) -> None:
         if not self.window.is_locked():
@@ -4582,4 +4602,6 @@ class App(QtWidgets.QApplication):
 
 if __name__ == "__main__":
     app = App(sys.argv)
+    if app.is_already_running():
+        sys.exit(0)
     sys.exit(app.exec())
