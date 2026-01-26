@@ -3021,6 +3021,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._startup_shutdown_timer.setSingleShot(True)
         self._startup_shutdown_timer.timeout.connect(self._execute_startup_shutdowns)
         self._startup_shutdown_payload: Optional[Tuple[str, bool, bool]] = None
+        self._startup_shutdown_deadline: Optional[datetime] = None
+        self._startup_shutdown_remaining_sec: Optional[int] = None
         self._build_palette()
         initial_icon = self._brand_icon or create_tray_icon(self.cfg_mgr.config.theme_accent)
         self.setWindowIcon(initial_icon)
@@ -3446,7 +3448,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.overlay.hide()
             self._hide_to_tray()
         else:
-            self._cancel_startup_shutdown("로그인으로 자동 종료를 취소합니다.")
+            self._pause_startup_shutdown("로그인으로 자동 종료를 일시 정지합니다.")
 
     def is_locked(self) -> bool:
         return self._locked
@@ -3514,6 +3516,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not allow_remote and not allow_local:
             return
         self._startup_shutdown_payload = (reason, allow_remote, allow_local)
+        self._startup_shutdown_deadline = datetime.now() + timedelta(seconds=STARTUP_SHUTDOWN_GRACE_SEC)
+        self._startup_shutdown_remaining_sec = None
         self._startup_shutdown_timer.start(STARTUP_SHUTDOWN_GRACE_SEC * 1000)
         message = f"{reason}이라 {STARTUP_SHUTDOWN_GRACE_SEC}초 후 자동 종료를 실행합니다."
         if self.tray:
@@ -3521,13 +3525,40 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             show_warning_message(self, "자동 종료 대기", message)
 
-    def _cancel_startup_shutdown(self, reason: str) -> None:
+    def _pause_startup_shutdown(self, reason: str) -> None:
         if not self._startup_shutdown_payload:
             return
         self._startup_shutdown_timer.stop()
-        self._startup_shutdown_payload = None
+        remaining = None
+        if self._startup_shutdown_deadline is not None:
+            remaining = max(0, int((self._startup_shutdown_deadline - datetime.now()).total_seconds()))
+        self._startup_shutdown_remaining_sec = remaining
+        self._startup_shutdown_deadline = None
         if self.tray:
             self.tray.showMessage(APP_NAME, reason, QtWidgets.QSystemTrayIcon.Information, 4000)
+
+    def _resume_startup_shutdown_if_needed(self) -> None:
+        if not self._startup_shutdown_payload:
+            return
+        cfg = self.cfg_mgr.config
+        today = datetime.now().date()
+        if not (cfg.holidays_enabled and is_holiday(cfg, today)):
+            self._startup_shutdown_payload = None
+            self._startup_shutdown_deadline = None
+            self._startup_shutdown_remaining_sec = None
+            return
+        remaining = self._startup_shutdown_remaining_sec
+        if remaining is None:
+            remaining = STARTUP_SHUTDOWN_GRACE_SEC
+        if remaining <= 0:
+            self._execute_startup_shutdowns()
+            return
+        self._startup_shutdown_deadline = datetime.now() + timedelta(seconds=remaining)
+        self._startup_shutdown_remaining_sec = None
+        self._startup_shutdown_timer.start(remaining * 1000)
+        message = f"휴일 자동 종료가 다시 시작되었습니다. {remaining}초 후 실행됩니다."
+        if self.tray:
+            self.tray.showMessage(APP_NAME, message, QtWidgets.QSystemTrayIcon.Warning, 4000)
 
     def _execute_startup_shutdowns(self) -> None:
         payload = self._startup_shutdown_payload
@@ -3843,7 +3874,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.setWindowFlag(Qt.Tool, True)
 
     def _show_from_tray(self) -> None:
-        self._cancel_startup_shutdown("프로그램 창이 열려 자동 종료를 취소합니다.")
+        self._pause_startup_shutdown("프로그램 창이 열려 자동 종료를 일시 정지합니다.")
         self._set_taskbar_visibility(True)
         self.showNormal()
         self.raise_()
@@ -3856,6 +3887,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hide()
         if notify and self.tray:
             self.tray.showMessage(APP_NAME, "프로그램은 계속 백그라운드에서 실행됩니다.")
+        self._resume_startup_shutdown_if_needed()
 
     def _on_schedule_triggered(self, day_key: str, audio_path: str, allow_remote: bool, allow_local: bool) -> None:
         if (
