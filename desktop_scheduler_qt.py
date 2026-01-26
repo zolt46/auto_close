@@ -265,6 +265,9 @@ class SchedulerConfig:
     remote_hosts: List[Dict[str, str]] = field(default_factory=lambda: DEFAULT_REMOTE.copy())
     enable_remote_shutdown: bool = True
     enable_local_shutdown: bool = True
+    holiday_shutdown_enabled: bool = True
+    holiday_remote_shutdown: bool = True
+    holiday_local_shutdown: bool = True
     shutdown_delay: int = 5
     holidays_enabled: bool = True
     auto_skip_weekends: bool = True
@@ -312,6 +315,9 @@ class SchedulerConfig:
             "remote_hosts",
             "enable_remote_shutdown",
             "enable_local_shutdown",
+            "holiday_shutdown_enabled",
+            "holiday_remote_shutdown",
+            "holiday_local_shutdown",
             "shutdown_delay",
             "holidays_enabled",
             "auto_skip_weekends",
@@ -990,12 +996,14 @@ class StyledToggle(QtWidgets.QCheckBox):
         accent = palette.color(QPalette.Highlight)
         border = palette.color(QPalette.Mid)
         track_off = palette.color(QPalette.Base)
-        knob_color = palette.color(QPalette.HighlightedText)
+        knob_on = palette.color(QPalette.HighlightedText)
+        knob_off = palette.color(QPalette.Base)
         if not self.isEnabled():
             accent = palette.color(QPalette.Midlight)
             border = palette.color(QPalette.Dark)
             track_off = palette.color(QPalette.Midlight)
-            knob_color = palette.color(QPalette.WindowText)
+            knob_on = palette.color(QPalette.WindowText)
+            knob_off = palette.color(QPalette.WindowText)
         track_color = accent if self.isChecked() else track_off
         painter.setPen(QtGui.QPen(border, 1.5))
         painter.setBrush(track_color)
@@ -1007,8 +1015,12 @@ class StyledToggle(QtWidgets.QCheckBox):
         else:
             knob_x = rect.left() + 3
         knob_rect = QtCore.QRectF(knob_x, knob_y, knob_size, knob_size)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(knob_color)
+        if self.isChecked():
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(knob_on)
+        else:
+            painter.setPen(QtGui.QPen(border, 1.2))
+            painter.setBrush(knob_off)
         painter.drawEllipse(knob_rect)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - UI 이벤트
@@ -1778,6 +1790,15 @@ class SettingsPanel(FancyCard):
         self.local_toggle = StyledToggle()
         self.local_toggle.setChecked(cfg_mgr.config.enable_local_shutdown)
         self.local_toggle.setToolTip("스케줄 종료 후 이 PC를 종료합니다.")
+        self.holiday_shutdown_toggle = StyledToggle()
+        self.holiday_shutdown_toggle.setChecked(cfg_mgr.config.holiday_shutdown_enabled)
+        self.holiday_shutdown_toggle.setToolTip("휴일일 때 자동 종료 절차를 사용할지 설정합니다.")
+        self.holiday_remote_toggle = StyledToggle()
+        self.holiday_remote_toggle.setChecked(cfg_mgr.config.holiday_remote_shutdown)
+        self.holiday_remote_toggle.setToolTip("휴일 자동 종료 시 원격 종료 명령을 전송합니다.")
+        self.holiday_local_toggle = StyledToggle()
+        self.holiday_local_toggle.setChecked(cfg_mgr.config.holiday_local_shutdown)
+        self.holiday_local_toggle.setToolTip("휴일 자동 종료 시 이 PC를 종료합니다.")
         self.startup_toggle = StyledToggle()
         self.startup_toggle.setChecked(cfg_mgr.config.start_with_os)
         self.startup_toggle.setToolTip("Windows 로그인 시 프로그램을 자동 실행합니다.")
@@ -1805,6 +1826,9 @@ class SettingsPanel(FancyCard):
         form.addRow("종료 대상 프로그램", self.target_edit)
         form.addRow("원격 종료", create_toggle_field("사용", self.remote_toggle))
         form.addRow("본체 종료", create_toggle_field("사용", self.local_toggle))
+        form.addRow("휴일 자동 종료", create_toggle_field("사용", self.holiday_shutdown_toggle))
+        form.addRow("휴일 원격 종료", create_toggle_field("사용", self.holiday_remote_toggle))
+        form.addRow("휴일 본체 종료", create_toggle_field("사용", self.holiday_local_toggle))
         form.addRow("종료 지연(초)", self.delay_spin)
         form.addRow("시작 프로그램 등록", create_toggle_field("사용", self.startup_toggle))
         form.addRow("테마", self.accent_btn)
@@ -1849,6 +1873,10 @@ class SettingsPanel(FancyCard):
         self.target_edit.editingFinished.connect(self._persist_targets)
         self.remote_toggle.stateChanged.connect(lambda _: self._persist())
         self.local_toggle.stateChanged.connect(lambda _: self._persist())
+        self.holiday_shutdown_toggle.stateChanged.connect(lambda _: self._persist())
+        self.holiday_remote_toggle.stateChanged.connect(lambda _: self._persist())
+        self.holiday_local_toggle.stateChanged.connect(lambda _: self._persist())
+        self.holiday_shutdown_toggle.stateChanged.connect(lambda _: self._update_holiday_controls())
         self.startup_toggle.stateChanged.connect(lambda _: self._persist())
         self.delay_spin.valueChanged.connect(lambda _: self._persist())
         self.accent_btn.clicked.connect(self._pick_color)
@@ -1870,6 +1898,12 @@ class SettingsPanel(FancyCard):
         self._loading_hosts = False
         self._load_hosts()
         self._log_dialog: Optional[TerminalLogDialog] = None
+        self._update_holiday_controls()
+
+    def _update_holiday_controls(self) -> None:
+        enabled = self.holiday_shutdown_toggle.isChecked()
+        self.holiday_remote_toggle.setEnabled(enabled)
+        self.holiday_local_toggle.setEnabled(enabled)
 
     def _persist_targets(self) -> None:
         raw = [p.strip() for p in self.target_edit.text().split(",") if p.strip()]
@@ -1884,6 +1918,9 @@ class SettingsPanel(FancyCard):
         def updater(cfg: SchedulerConfig) -> None:
             cfg.enable_remote_shutdown = self.remote_toggle.isChecked()
             cfg.enable_local_shutdown = self.local_toggle.isChecked()
+            cfg.holiday_shutdown_enabled = self.holiday_shutdown_toggle.isChecked()
+            cfg.holiday_remote_shutdown = self.holiday_remote_toggle.isChecked()
+            cfg.holiday_local_shutdown = self.holiday_local_toggle.isChecked()
             cfg.start_with_os = start
             cfg.shutdown_delay = self.delay_spin.value()
         self.cfg_mgr.update(updater)
@@ -1903,11 +1940,15 @@ class SettingsPanel(FancyCard):
         for toggle, value in (
             (self.remote_toggle, cfg.enable_remote_shutdown),
             (self.local_toggle, cfg.enable_local_shutdown),
+            (self.holiday_shutdown_toggle, cfg.holiday_shutdown_enabled),
+            (self.holiday_remote_toggle, cfg.holiday_remote_shutdown),
+            (self.holiday_local_toggle, cfg.holiday_local_shutdown),
             (self.startup_toggle, cfg.start_with_os),
         ):
             toggle.blockSignals(True)
             toggle.setChecked(value)
             toggle.blockSignals(False)
+        self._update_holiday_controls()
         self.delay_spin.blockSignals(True)
         self.delay_spin.setValue(cfg.shutdown_delay)
         self.delay_spin.blockSignals(False)
@@ -3415,15 +3456,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_startup_shutdown_if_needed(self) -> None:
         cfg = self.cfg_mgr.config
         today = datetime.now().date()
-        day_key = DAY_KEYS[today.weekday()]
-        day_cfg = cfg.days.get(day_key)
-        if not day_cfg:
+        if not (cfg.holidays_enabled and is_holiday(cfg, today)):
             return
-        if is_service_day(cfg, day_cfg, today):
+        if not cfg.holiday_shutdown_enabled:
             return
-        reason = "휴일" if cfg.holidays_enabled and is_holiday(cfg, today) else "비활성 요일"
-        allow_remote = cfg.enable_remote_shutdown and day_cfg.allow_remote
-        allow_local = cfg.enable_local_shutdown and day_cfg.allow_local_shutdown
+        reason = "휴일"
+        allow_remote = cfg.holiday_remote_shutdown and cfg.enable_remote_shutdown
+        allow_local = cfg.holiday_local_shutdown and cfg.enable_local_shutdown
         if not allow_remote and not allow_local:
             return
         self._startup_shutdown_payload = (reason, allow_remote, allow_local)
