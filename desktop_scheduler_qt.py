@@ -74,10 +74,6 @@ DEFAULT_APP_ICON = resource_path(f"{DEFAULT_ASSET_DIR}/app_icon.ico")
 DEFAULT_SAVER_IMAGE = resource_path(f"{DEFAULT_ASSET_DIR}/default_saver.png")
 DEFAULT_HEADER_LOGO = resource_path(f"{DEFAULT_ASSET_DIR}/topbar_logo.png")
 
-CHROME_CANDIDATES = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-]
 
 PREFERRED_UI_FONTS = [
     "Noto Sans KR",
@@ -167,47 +163,6 @@ class IdleTimeDetector:
         except Exception:
             return 0.0
 
-def find_chrome_executable() -> str:
-    for candidate in CHROME_CANDIDATES:
-        if Path(candidate).exists():
-            return candidate
-    fallback = shutil.which("chrome") or shutil.which("chrome.exe")
-    if fallback:
-        return fallback
-    return "chrome"
-
-
-def launch_chrome_window(
-    url: str,
-    profile_dir: Path,
-    *,
-    fullscreen: bool = False,
-    kiosk: bool = False,
-) -> Optional[subprocess.Popen]:
-    target = url.strip()
-    if not target:
-        return None
-    chrome = find_chrome_executable()
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    args = [
-        chrome,
-        f"--user-data-dir={profile_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--new-window",
-    ]
-    if fullscreen:
-        args.append("--start-fullscreen")
-    if kiosk:
-        args.append("--kiosk")
-    args.append(target)
-    try:
-        return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as exc:  # pragma: no cover - 실행 환경 의존
-        print(f"[Chrome 실행 실패] {exc}")
-        return None
-
-
 class ConfigLocator:
     """현재 설정 파일 위치를 추적하고 변경을 돕는 도우미."""
 
@@ -282,7 +237,7 @@ class DaySchedule:
     audio_path: Optional[str] = None
     allow_remote: bool = True
     allow_local_shutdown: bool = True
-    last_ran: Optional[str] = None  # yyyy-mm-dd
+    last_ran: Optional[str] = None  # ISO datetime
 
     def as_dict(self) -> Dict[str, object]:
         data = asdict(self)
@@ -474,12 +429,30 @@ def is_holiday(cfg: SchedulerConfig, target: date) -> bool:
     return False
 
 
+def _parse_last_ran(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def has_run_for_schedule(day_cfg: DaySchedule, scheduled: datetime) -> bool:
+    last_ran = _parse_last_ran(day_cfg.last_ran)
+    if last_ran is None:
+        return False
+    return last_ran >= scheduled
+
+
 def is_day_eligible(cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: date) -> bool:
     if not day_cfg.enabled:
         return False
     if cfg.holidays_enabled and is_holiday(cfg, current_date):
-        return False
-    if day_cfg.last_ran == current_date.isoformat():
         return False
     return True
 
@@ -490,19 +463,6 @@ def is_service_day(cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: dat
     if cfg.holidays_enabled and is_holiday(cfg, current_date):
         return False
     return True
-
-
-def resolve_screensaver_image(cfg: SchedulerConfig) -> Tuple[Optional[Path], str]:
-    mode = (cfg.wakeup_saver_image_mode or "bundled").lower()
-    if mode == "path" and cfg.wakeup_image_path:
-        candidate = Path(cfg.wakeup_image_path).expanduser()
-        if candidate.exists():
-            return candidate, mode
-    if mode == "generated":
-        return None, mode
-    if DEFAULT_SAVER_IMAGE.exists():
-        return DEFAULT_SAVER_IMAGE, "bundled"
-    return None, "generated"
 
 
 @dataclass
@@ -532,6 +492,8 @@ def compute_upcoming_runs(cfg: SchedulerConfig, horizon_days: int = 28, limit: O
         except Exception:
             continue
         scheduled = current.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if has_run_for_schedule(day_cfg, scheduled):
+            continue
         if scheduled < now:
             continue
         if day_cfg.auto_assign and playlist_len:
@@ -675,7 +637,7 @@ class SchedulerEngine(QtCore.QObject):
         self.cfg_mgr = cfg_mgr
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._last_trigger_marker: Optional[Tuple[str, date]] = None
+        self._last_trigger_marker: Optional[Tuple[str, datetime]] = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -711,15 +673,18 @@ class SchedulerEngine(QtCore.QObject):
         cfg = self.cfg_mgr.config
         day_key = DAY_KEYS[now.weekday()]
         day_cfg = cfg.days[day_key]
-        if day_cfg.last_ran != now.date().isoformat():
+        last_ran = _parse_last_ran(day_cfg.last_ran)
+        if not last_ran or last_ran.date() != now.date():
             self._last_trigger_marker = None
         if not self._is_day_eligible(cfg, day_cfg, now.date()):
             return
         hh, mm = map(int, day_cfg.time.split(":"))
         target_time = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if has_run_for_schedule(day_cfg, target_time):
+            return
         delta = (now - target_time).total_seconds()
         if 0 <= delta <= 30:
-            marker = (day_key, now.date())
+            marker = (day_key, target_time)
             if self._last_trigger_marker == marker:
                 return
             self._last_trigger_marker = marker
@@ -730,7 +695,9 @@ class SchedulerEngine(QtCore.QObject):
                 cfg.enable_remote_shutdown and day_cfg.allow_remote,
                 cfg.enable_local_shutdown and day_cfg.allow_local_shutdown,
             )
-            self.cfg_mgr.update(lambda c: c.days[day_key].__setattr__("last_ran", now.date().isoformat()))
+            self.cfg_mgr.update(
+                lambda c: c.days[day_key].__setattr__("last_ran", now.replace(microsecond=0).isoformat())
+            )
 
     def _resolve_audio(self, cfg: SchedulerConfig, day_cfg: DaySchedule) -> Optional[str]:
         if not day_cfg.auto_assign and day_cfg.audio_path:
@@ -916,13 +883,17 @@ def shutdown_remote(
                 ssh_commands = _collect_ssh_commands()
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                password = (host.get("password") or "").strip()
+                key_path = (host.get("key_path") or "").strip()
+                key_filename = str(Path(key_path).expanduser()) if key_path else None
                 ssh.connect(
                     hostname=target,
                     username=host.get("username") or None,
-                    password=host.get("password") or None,
+                    password=password or None,
                     timeout=10,
-                    look_for_keys=False,
-                    allow_agent=False,
+                    look_for_keys=not password,
+                    allow_agent=not password,
+                    key_filename=key_filename,
                 )
 
                 errors: List[str] = []
@@ -995,35 +966,52 @@ class StyledToggle(QtWidgets.QCheckBox):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("StyledToggle")
         self.setCursor(Qt.PointingHandCursor)
         self.setTristate(False)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setFixedHeight(30)
-        self.setStyleSheet(
-            """
-            QCheckBox {
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 50px;
-                height: 26px;
-                border-radius: 13px;
-                border: 2px solid #90A4C5;
-                background-color: #E3EAF6;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #3461C1;
-                border-color: #244B9A;
-            }
-            QCheckBox::indicator:unchecked {
-                background-color: #E3EAF6;
-            }
-            QCheckBox::indicator:disabled {
-                background-color: #C7CFDD;
-                border-color: #A5B1C8;
-            }
-            """
-        )
+        self.setFixedSize(54, 30)
+        self.setText("")
+
+    def sizeHint(self) -> QtCore.QSize:  # pragma: no cover - UI hint
+        return QtCore.QSize(54, 30)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # pragma: no cover - UI 이벤트
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = self.rect().adjusted(2, 2, -2, -2)
+        radius = rect.height() / 2
+        palette = self.palette()
+        accent = palette.color(QPalette.Highlight)
+        border = palette.color(QPalette.Mid)
+        track_off = palette.color(QPalette.Base)
+        knob_color = palette.color(QPalette.HighlightedText)
+        if not self.isEnabled():
+            accent = palette.color(QPalette.Midlight)
+            border = palette.color(QPalette.Dark)
+            track_off = palette.color(QPalette.Midlight)
+            knob_color = palette.color(QPalette.WindowText)
+        track_color = accent if self.isChecked() else track_off
+        painter.setPen(QtGui.QPen(border, 1.5))
+        painter.setBrush(track_color)
+        painter.drawRoundedRect(rect, radius, radius)
+        knob_size = rect.height() - 6
+        knob_y = rect.top() + 3
+        if self.isChecked():
+            knob_x = rect.right() - knob_size - 3
+        else:
+            knob_x = rect.left() + 3
+        knob_rect = QtCore.QRectF(knob_x, knob_y, knob_size, knob_size)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(knob_color)
+        painter.drawEllipse(knob_rect)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - UI 이벤트
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 def create_toggle_field(text: str, toggle: QtWidgets.QCheckBox) -> QtWidgets.QWidget:
@@ -1801,19 +1789,6 @@ class SettingsPanel(FancyCard):
         path_change_btn.setCursor(Qt.PointingHandCursor)
         path_row.addWidget(self.config_path_label, 1)
         path_row.addWidget(path_change_btn)
-        logo_row = QtWidgets.QHBoxLayout()
-        self.logo_path_label = QtWidgets.QLabel()
-        self.logo_path_label.setWordWrap(True)
-        self.logo_path_label.setProperty("role", "subtitle")
-        self.logo_choose_btn = QtWidgets.QPushButton("로고 선택")
-        self.logo_clear_btn = QtWidgets.QPushButton("기본값")
-        for btn in (self.logo_choose_btn, self.logo_clear_btn):
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setEnabled(True)
-            btn.setMinimumWidth(90)
-        logo_row.addWidget(self.logo_path_label, 1)
-        logo_row.addWidget(self.logo_choose_btn)
-        logo_row.addWidget(self.logo_clear_btn)
         password_row = QtWidgets.QHBoxLayout()
         self.user_password_btn = QtWidgets.QPushButton("일반 비밀번호 변경")
         self.admin_password_btn = QtWidgets.QPushButton("관리자 비밀번호 변경")
@@ -1829,7 +1804,6 @@ class SettingsPanel(FancyCard):
         form.addRow("시작 프로그램 등록", create_toggle_field("사용", self.startup_toggle))
         form.addRow("테마", self.accent_btn)
         form.addRow("설정 저장 위치", path_row)
-        form.addRow("상단 로고", logo_row)
         form.addRow("비밀번호 관리", password_row)
         outer.addLayout(form)
         hosts_group = QtWidgets.QGroupBox("원격 PC 목록")
@@ -1881,18 +1855,6 @@ class SettingsPanel(FancyCard):
         self.cfg_mgr.storage_dir_changed.connect(self._on_storage_dir_changed)
         self.user_password_btn.clicked.connect(self._change_user_password)
         self.admin_password_btn.clicked.connect(self._change_admin_password)
-        choose_handler = getattr(self, "_choose_logo_image", None)
-        clear_handler = getattr(self, "_clear_logo_image", None)
-        if callable(choose_handler):
-            self.logo_choose_btn.clicked.connect(choose_handler)
-        else:  # pragma: no cover - 안전장치
-            self.logo_choose_btn.setEnabled(False)
-            self.logo_choose_btn.setToolTip("로고 선택 기능을 초기화할 수 없습니다.")
-        if callable(clear_handler):
-            self.logo_clear_btn.clicked.connect(clear_handler)
-        else:  # pragma: no cover - 안전장치
-            self.logo_clear_btn.setEnabled(False)
-            self.logo_clear_btn.setToolTip("로고 초기화 기능을 사용할 수 없습니다.")
         self.test_completed.connect(self._on_test_result)
         self.log_generated.connect(self._append_test_log)
         self._targets_timer = QtCore.QTimer(self)
@@ -1901,7 +1863,6 @@ class SettingsPanel(FancyCard):
         self._targets_timer.timeout.connect(self._persist_targets)
         self.target_edit.textChanged.connect(lambda _: self._targets_timer.start())
         self._loading_hosts = False
-        self._update_logo_summary(self.cfg_mgr.config.header_logo_path)
         self._load_hosts()
         self._log_dialog: Optional[TerminalLogDialog] = None
 
@@ -1947,7 +1908,6 @@ class SettingsPanel(FancyCard):
         self.delay_spin.blockSignals(False)
         self._load_hosts()
         self._update_config_path_label()
-        self._update_logo_summary(cfg.header_logo_path)
 
     def _load_hosts(self) -> None:
         self._loading_hosts = True
@@ -2206,19 +2166,6 @@ class SettingsPanel(FancyCard):
         self.config_path_label.setText(target)
         self.config_path_label.setToolTip(target)
 
-    def _update_logo_summary(self, path: Optional[str]) -> None:
-        if path:
-            name = Path(path).name
-            exists = Path(path).exists()
-            status = "사용 중" if exists else "확인 필요"
-            text = f"{status}: {name}"
-            tooltip = path
-        else:
-            text = "기본 로고 사용 중 (자동 생성)"
-            tooltip = "고급 설정에서 로고 이미지를 선택해 상단 바를 꾸밀 수 있습니다."
-        self.logo_path_label.setText(text)
-        self.logo_path_label.setToolTip(tooltip)
-
     def _change_user_password(self) -> None:
         dialog = PasswordChangeDialog("일반 사용자 비밀번호 변경", require_current=False, parent=self)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
@@ -2244,456 +2191,6 @@ class SettingsPanel(FancyCard):
         self.cfg_mgr.update(updater)
         show_success_message(self, "완료", "관리자 비밀번호가 변경되었습니다.")
 
-
-class WakeupSettingsPanel(FancyCard):
-    def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
-        super().__init__("웨이크업 설정", accent, parent)
-        self.cfg_mgr = cfg_mgr
-        self.set_subtitle("부팅 후 자동 실행되는 유튜브/키오스크/세이버를 설정합니다.")
-        form = QtWidgets.QFormLayout()
-        form.setSpacing(12)
-
-        self.enable_toggle = StyledToggle()
-        self.enable_toggle.setChecked(cfg_mgr.config.wakeup_enabled)
-        self.enable_toggle.setToolTip("부팅 후 자동 웨이크업 기능을 실행합니다.")
-
-        self.youtube_toggle = StyledToggle()
-        self.youtube_toggle.setChecked(cfg_mgr.config.wakeup_youtube_enabled)
-        self.youtube_toggle.setToolTip("유튜브 전체화면 재생을 사용합니다.")
-        self.youtube_url_edit = QtWidgets.QLineEdit(cfg_mgr.config.wakeup_youtube_url)
-        self.youtube_url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
-
-        self.kiosk_toggle = StyledToggle()
-        self.kiosk_toggle.setChecked(cfg_mgr.config.wakeup_kiosk_enabled)
-        self.kiosk_toggle.setToolTip("키오스크 모드 URL을 엽니다.")
-        self.kiosk_url_edit = QtWidgets.QLineEdit(cfg_mgr.config.wakeup_kiosk_url)
-        self.kiosk_url_edit.setPlaceholderText("https://example.com")
-        self.kiosk_delay_spin = QtWidgets.QSpinBox()
-        self.kiosk_delay_spin.setRange(0, 600)
-        self.kiosk_delay_spin.setValue(cfg_mgr.config.wakeup_kiosk_delay)
-
-        self.saver_toggle = StyledToggle()
-        self.saver_toggle.setChecked(cfg_mgr.config.wakeup_screensaver_enabled)
-        self.saver_toggle.setToolTip("스크린 세이버 화면을 표시합니다.")
-        self.saver_delay_spin = QtWidgets.QSpinBox()
-        self.saver_delay_spin.setRange(0, 600)
-        self.saver_delay_spin.setValue(cfg_mgr.config.wakeup_screensaver_delay)
-        self.saver_mode_combo = QtWidgets.QComboBox()
-        self.saver_mode_combo.addItem("기본 이미지(패키지)", "bundled")
-        self.saver_mode_combo.addItem("사용자 지정 이미지", "custom")
-        self.saver_path_label = QtWidgets.QLabel()
-        self.saver_path_label.setWordWrap(True)
-        self.saver_path_label.setProperty("role", "subtitle")
-        self.saver_choose_btn = QtWidgets.QPushButton("이미지 선택")
-        self.saver_clear_btn = QtWidgets.QPushButton("기본값")
-        for btn in (self.saver_choose_btn, self.saver_clear_btn):
-            btn.setCursor(Qt.PointingHandCursor)
-        saver_path_row = QtWidgets.QHBoxLayout()
-        saver_path_row.addWidget(self.saver_path_label, 1)
-        saver_path_row.addWidget(self.saver_choose_btn)
-        saver_path_row.addWidget(self.saver_clear_btn)
-
-        form.addRow("웨이크업 기능 사용", create_toggle_field("사용", self.enable_toggle))
-        form.addRow("유튜브 재생", create_toggle_field("사용", self.youtube_toggle))
-        form.addRow("유튜브 링크", self.youtube_url_edit)
-        form.addRow("키오스크 URL", create_toggle_field("사용", self.kiosk_toggle))
-        form.addRow("키오스크 링크", self.kiosk_url_edit)
-        form.addRow("키오스크 실행 지연(초)", self.kiosk_delay_spin)
-        form.addRow("스크린 세이버", create_toggle_field("사용", self.saver_toggle))
-        form.addRow("세이버 표시 지연(초)", self.saver_delay_spin)
-        form.addRow("세이버 이미지 모드", self.saver_mode_combo)
-        form.addRow("세이버 이미지", saver_path_row)
-        self.body_layout.addLayout(form)
-
-        self.enable_toggle.stateChanged.connect(lambda _: self._persist())
-        self.youtube_toggle.stateChanged.connect(lambda _: self._persist())
-        self.kiosk_toggle.stateChanged.connect(lambda _: self._persist())
-        self.saver_toggle.stateChanged.connect(lambda _: self._persist())
-        self.kiosk_delay_spin.valueChanged.connect(lambda _: self._persist())
-        self.saver_delay_spin.valueChanged.connect(lambda _: self._persist())
-        self.saver_mode_combo.currentIndexChanged.connect(lambda _: self._persist())
-        self.youtube_url_edit.editingFinished.connect(self._persist)
-        self.kiosk_url_edit.editingFinished.connect(self._persist)
-        self.saver_choose_btn.clicked.connect(self._choose_saver_image)
-        self.saver_clear_btn.clicked.connect(self._clear_saver_image)
-        self.sync_from_config()
-
-    def _current_saver_mode(self) -> str:
-        data = self.saver_mode_combo.currentData()
-        return data if isinstance(data, str) and data else "bundled"
-
-    def _persist(self) -> None:
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.wakeup_enabled = self.enable_toggle.isChecked()
-            cfg.wakeup_youtube_enabled = self.youtube_toggle.isChecked()
-            cfg.wakeup_youtube_url = self.youtube_url_edit.text().strip()
-            cfg.wakeup_kiosk_enabled = self.kiosk_toggle.isChecked()
-            cfg.wakeup_kiosk_url = self.kiosk_url_edit.text().strip()
-            cfg.wakeup_kiosk_delay = int(self.kiosk_delay_spin.value())
-            cfg.wakeup_screensaver_enabled = self.saver_toggle.isChecked()
-            cfg.wakeup_screensaver_delay = int(self.saver_delay_spin.value())
-            cfg.wakeup_screensaver_image_mode = self._current_saver_mode()
-        self.cfg_mgr.update(updater)
-        self._update_saver_path_label()
-
-    def _update_saver_path_label(self) -> None:
-        cfg = self.cfg_mgr.config
-        mode = (cfg.wakeup_screensaver_image_mode or "bundled").lower()
-        if mode == "custom" and cfg.wakeup_screensaver_image_path:
-            self.saver_path_label.setText(cfg.wakeup_screensaver_image_path)
-        else:
-            self.saver_path_label.setText(str(DEFAULT_SAVER_IMAGE) if DEFAULT_SAVER_IMAGE.exists() else "기본 이미지 없음")
-
-    def _choose_saver_image(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "세이버 이미지 선택",
-            "",
-            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif);;모든 파일 (*.*)",
-        )
-        if not path:
-            return
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.wakeup_screensaver_image_path = path
-            cfg.wakeup_screensaver_image_mode = "custom"
-        self.cfg_mgr.update(updater)
-        self.sync_from_config()
-
-    def _clear_saver_image(self) -> None:
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.wakeup_screensaver_image_path = None
-            cfg.wakeup_screensaver_image_mode = "bundled"
-        self.cfg_mgr.update(updater)
-        self.sync_from_config()
-
-    def sync_from_config(self) -> None:
-        cfg = self.cfg_mgr.config
-        for toggle, value in (
-            (self.enable_toggle, cfg.wakeup_enabled),
-            (self.youtube_toggle, cfg.wakeup_youtube_enabled),
-            (self.kiosk_toggle, cfg.wakeup_kiosk_enabled),
-            (self.saver_toggle, cfg.wakeup_screensaver_enabled),
-        ):
-            toggle.blockSignals(True)
-            toggle.setChecked(value)
-            toggle.blockSignals(False)
-        self.youtube_url_edit.blockSignals(True)
-        self.youtube_url_edit.setText(cfg.wakeup_youtube_url or "")
-        self.youtube_url_edit.blockSignals(False)
-        self.kiosk_url_edit.blockSignals(True)
-        self.kiosk_url_edit.setText(cfg.wakeup_kiosk_url or "")
-        self.kiosk_url_edit.blockSignals(False)
-        self.kiosk_delay_spin.blockSignals(True)
-        self.kiosk_delay_spin.setValue(cfg.wakeup_kiosk_delay)
-        self.kiosk_delay_spin.blockSignals(False)
-        self.saver_delay_spin.blockSignals(True)
-        self.saver_delay_spin.setValue(cfg.wakeup_screensaver_delay)
-        self.saver_delay_spin.blockSignals(False)
-        mode_value = (cfg.wakeup_screensaver_image_mode or "bundled").lower()
-        for i in range(self.saver_mode_combo.count()):
-            if self.saver_mode_combo.itemData(i) == mode_value:
-                self.saver_mode_combo.blockSignals(True)
-                self.saver_mode_combo.setCurrentIndex(i)
-                self.saver_mode_combo.blockSignals(False)
-                break
-        self._update_saver_path_label()
-
-    def _choose_logo_image(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "로고 이미지 선택",
-            str(Path.home()),
-            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif)",
-        )
-        if not path:
-            return
-
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.header_logo_path = path
-
-        self.cfg_mgr.update(updater)
-        self._update_logo_summary(path)
-        show_success_message(self, "상단 로고", "선택한 이미지가 상단 바에 적용되었습니다.")
-
-    def _clear_logo_image(self) -> None:
-        if not self.cfg_mgr.config.header_logo_path:
-            self._update_logo_summary(None)
-            return
-
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.header_logo_path = None
-
-        self.cfg_mgr.update(updater)
-        self._update_logo_summary(None)
-        show_info_message(self, "상단 로고", "기본 로고로 돌아갔습니다.")
-
-
-class WakeupSettingsPanel(FancyCard):
-    def __init__(self, cfg_mgr: ConfigManager, accent: str, parent=None) -> None:
-        super().__init__("웨이크업 설정", accent, parent)
-        self.cfg_mgr = cfg_mgr
-        self.set_subtitle("AutoWake와 동일한 옵션으로 부팅 후 자동 실행 동작을 설정합니다.")
-        form = QtWidgets.QFormLayout()
-        form.setSpacing(12)
-
-        self.enable_toggle = StyledToggle()
-        self.enable_toggle.setChecked(cfg_mgr.config.wakeup_enabled)
-        self.enable_toggle.setToolTip("부팅 후 자동 웨이크업 기능을 실행합니다.")
-
-        self.audio_toggle = StyledToggle()
-        self.audio_toggle.setChecked(cfg_mgr.config.wakeup_audio_enabled)
-        self.audio_toggle.setToolTip("유튜브 음원 링크를 재생합니다.")
-        self.audio_list = QtWidgets.QListWidget()
-        self.audio_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.audio_list.setAlternatingRowColors(True)
-        audio_btn_row = QtWidgets.QHBoxLayout()
-        self.audio_add_btn = QtWidgets.QPushButton("링크 추가")
-        self.audio_remove_btn = QtWidgets.QPushButton("삭제")
-        for btn in (self.audio_add_btn, self.audio_remove_btn):
-            btn.setCursor(Qt.PointingHandCursor)
-        audio_btn_row.addWidget(self.audio_add_btn)
-        audio_btn_row.addWidget(self.audio_remove_btn)
-        audio_btn_row.addStretch(1)
-        self.audio_mode_combo = QtWidgets.QComboBox()
-        self.audio_mode_combo.addItem("일반", "normal")
-        self.audio_mode_combo.addItem("전체화면", "fullscreen")
-        self.audio_mode_combo.addItem("키오스크", "kiosk")
-
-        self.target_toggle = StyledToggle()
-        self.target_toggle.setChecked(cfg_mgr.config.wakeup_target_enabled)
-        self.target_toggle.setToolTip("특정 URL을 열어 화면을 표시합니다.")
-        self.target_url_edit = QtWidgets.QLineEdit(cfg_mgr.config.wakeup_target_url)
-        self.target_url_edit.setPlaceholderText("https://example.com")
-        self.target_mode_combo = QtWidgets.QComboBox()
-        self.target_mode_combo.addItem("일반", "normal")
-        self.target_mode_combo.addItem("전체화면", "fullscreen")
-        self.target_mode_combo.addItem("키오스크", "kiosk")
-
-        self.chrome_repeat_toggle = StyledToggle()
-        self.chrome_repeat_toggle.setChecked(cfg_mgr.config.wakeup_chrome_repeat)
-        self.chrome_relaunch_spin = QtWidgets.QDoubleSpinBox()
-        self.chrome_relaunch_spin.setRange(1.0, 120.0)
-        self.chrome_relaunch_spin.setDecimals(1)
-        self.chrome_relaunch_spin.setSingleStep(0.5)
-        self.chrome_relaunch_spin.setValue(cfg_mgr.config.wakeup_chrome_relaunch_cooldown_sec)
-
-        self.saver_toggle = StyledToggle()
-        self.saver_toggle.setChecked(cfg_mgr.config.wakeup_saver_enabled)
-        self.saver_toggle.setToolTip("유휴 상태에서 스크린 세이버 화면을 표시합니다.")
-        self.idle_spin = QtWidgets.QDoubleSpinBox()
-        self.idle_spin.setRange(1.0, 3600.0)
-        self.idle_spin.setDecimals(1)
-        self.idle_spin.setSingleStep(1.0)
-        self.idle_spin.setValue(cfg_mgr.config.wakeup_idle_to_show_sec)
-        self.active_spin = QtWidgets.QDoubleSpinBox()
-        self.active_spin.setRange(0.1, 60.0)
-        self.active_spin.setDecimals(1)
-        self.active_spin.setSingleStep(0.1)
-        self.active_spin.setValue(cfg_mgr.config.wakeup_active_threshold_sec)
-        self.poll_spin = QtWidgets.QDoubleSpinBox()
-        self.poll_spin.setRange(0.1, 10.0)
-        self.poll_spin.setDecimals(1)
-        self.poll_spin.setSingleStep(0.1)
-        self.poll_spin.setValue(cfg_mgr.config.wakeup_poll_sec)
-        self.saver_mode_combo = QtWidgets.QComboBox()
-        self.saver_mode_combo.addItem("기본 이미지(패키지)", "bundled")
-        self.saver_mode_combo.addItem("사용자 지정 이미지", "path")
-        self.saver_mode_combo.addItem("안내 문구(자동 생성)", "generated")
-        self.saver_path_label = QtWidgets.QLabel()
-        self.saver_path_label.setWordWrap(True)
-        self.saver_path_label.setProperty("role", "subtitle")
-        self.saver_choose_btn = QtWidgets.QPushButton("이미지 선택")
-        self.saver_clear_btn = QtWidgets.QPushButton("기본값")
-        for btn in (self.saver_choose_btn, self.saver_clear_btn):
-            btn.setCursor(Qt.PointingHandCursor)
-        saver_path_row = QtWidgets.QHBoxLayout()
-        saver_path_row.addWidget(self.saver_path_label, 1)
-        saver_path_row.addWidget(self.saver_choose_btn)
-        saver_path_row.addWidget(self.saver_clear_btn)
-
-        form.addRow("웨이크업 기능 사용", create_toggle_field("사용", self.enable_toggle))
-        form.addRow("음원 재생", create_toggle_field("사용", self.audio_toggle))
-        audio_list_container = QtWidgets.QVBoxLayout()
-        audio_list_container.addWidget(self.audio_list)
-        audio_list_container.addLayout(audio_btn_row)
-        audio_list_widget = QtWidgets.QWidget()
-        audio_list_widget.setLayout(audio_list_container)
-        form.addRow("음원 링크 목록", audio_list_widget)
-        form.addRow("음원 열기 모드", self.audio_mode_combo)
-        form.addRow("특정 주소", create_toggle_field("사용", self.target_toggle))
-        form.addRow("특정 주소 URL", self.target_url_edit)
-        form.addRow("특정 주소 모드", self.target_mode_combo)
-        form.addRow("크롬 반복 실행", create_toggle_field("사용", self.chrome_repeat_toggle))
-        form.addRow("크롬 재실행 쿨다운(초)", self.chrome_relaunch_spin)
-        form.addRow("스크린 세이버", create_toggle_field("사용", self.saver_toggle))
-        form.addRow("유휴 후 표시 시간(초)", self.idle_spin)
-        form.addRow("활동 감지 임계(초)", self.active_spin)
-        form.addRow("감시 주기(초)", self.poll_spin)
-        form.addRow("세이버 이미지 모드", self.saver_mode_combo)
-        form.addRow("세이버 이미지", saver_path_row)
-        self.body_layout.addLayout(form)
-
-        self.enable_toggle.stateChanged.connect(lambda _: self._persist())
-        self.audio_toggle.stateChanged.connect(lambda _: self._persist())
-        self.target_toggle.stateChanged.connect(lambda _: self._persist())
-        self.chrome_repeat_toggle.stateChanged.connect(lambda _: self._persist())
-        self.chrome_relaunch_spin.valueChanged.connect(lambda _: self._persist())
-        self.saver_toggle.stateChanged.connect(lambda _: self._persist())
-        self.idle_spin.valueChanged.connect(lambda _: self._persist())
-        self.active_spin.valueChanged.connect(lambda _: self._persist())
-        self.poll_spin.valueChanged.connect(lambda _: self._persist())
-        self.saver_mode_combo.currentIndexChanged.connect(lambda _: self._persist())
-        self.audio_mode_combo.currentIndexChanged.connect(lambda _: self._persist())
-        self.target_mode_combo.currentIndexChanged.connect(lambda _: self._persist())
-        self.audio_add_btn.clicked.connect(self._add_audio_url)
-        self.audio_remove_btn.clicked.connect(self._remove_audio_url)
-        self.target_url_edit.editingFinished.connect(self._persist)
-        self.saver_choose_btn.clicked.connect(self._choose_saver_image)
-        self.saver_clear_btn.clicked.connect(self._clear_saver_image)
-        self.sync_from_config()
-
-    def _current_saver_mode(self) -> str:
-        data = self.saver_mode_combo.currentData()
-        return data if isinstance(data, str) and data else "bundled"
-
-    def _persist(self) -> None:
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.wakeup_enabled = self.enable_toggle.isChecked()
-            cfg.wakeup_audio_enabled = self.audio_toggle.isChecked()
-            cfg.wakeup_audio_urls = self._parse_audio_urls()
-            cfg.wakeup_audio_mode = self._current_audio_mode()
-            cfg.wakeup_target_enabled = self.target_toggle.isChecked()
-            cfg.wakeup_target_url = self.target_url_edit.text().strip()
-            cfg.wakeup_target_mode = self._current_target_mode()
-            cfg.wakeup_chrome_repeat = self.chrome_repeat_toggle.isChecked()
-            cfg.wakeup_chrome_relaunch_cooldown_sec = float(self.chrome_relaunch_spin.value())
-            cfg.wakeup_saver_enabled = self.saver_toggle.isChecked()
-            cfg.wakeup_idle_to_show_sec = float(self.idle_spin.value())
-            cfg.wakeup_active_threshold_sec = float(self.active_spin.value())
-            cfg.wakeup_poll_sec = float(self.poll_spin.value())
-            cfg.wakeup_saver_image_mode = self._current_saver_mode()
-        self.cfg_mgr.update(updater)
-        self._update_saver_path_label()
-
-    def _update_saver_path_label(self) -> None:
-        cfg = self.cfg_mgr.config
-        mode = (cfg.wakeup_saver_image_mode or "bundled").lower()
-        if mode == "path" and cfg.wakeup_image_path:
-            self.saver_path_label.setText(cfg.wakeup_image_path)
-        elif mode == "generated":
-            self.saver_path_label.setText("안내 문구 자동 생성")
-        else:
-            self.saver_path_label.setText(str(DEFAULT_SAVER_IMAGE) if DEFAULT_SAVER_IMAGE.exists() else "기본 이미지 없음")
-
-    def _choose_saver_image(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "세이버 이미지 선택",
-            "",
-            "이미지 파일 (*.png *.jpg *.jpeg *.bmp *.gif);;모든 파일 (*.*)",
-        )
-        if not path:
-            return
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.wakeup_image_path = path
-            cfg.wakeup_saver_image_mode = "path"
-        self.cfg_mgr.update(updater)
-        self.sync_from_config()
-
-    def _clear_saver_image(self) -> None:
-        def updater(cfg: SchedulerConfig) -> None:
-            cfg.wakeup_image_path = None
-            cfg.wakeup_saver_image_mode = "bundled"
-        self.cfg_mgr.update(updater)
-        self.sync_from_config()
-
-    def _parse_audio_urls(self) -> List[str]:
-        urls: List[str] = []
-        for i in range(self.audio_list.count()):
-            text = self.audio_list.item(i).text().strip()
-            if text:
-                urls.append(text)
-        return urls
-
-    def _add_audio_url(self) -> None:
-        url, ok = QtWidgets.QInputDialog.getText(self, "음원 링크 추가", "유튜브 링크:")
-        if not ok or not url.strip():
-            return
-        self.audio_list.addItem(url.strip())
-        self._persist()
-
-    def _remove_audio_url(self) -> None:
-        items = self.audio_list.selectedItems()
-        if not items:
-            show_info_message(self, "안내", "삭제할 링크를 선택하세요.")
-            return
-        for item in items:
-            row = self.audio_list.row(item)
-            self.audio_list.takeItem(row)
-        self._persist()
-
-    def _current_audio_mode(self) -> str:
-        data = self.audio_mode_combo.currentData()
-        return data if isinstance(data, str) and data else "normal"
-
-    def _current_target_mode(self) -> str:
-        data = self.target_mode_combo.currentData()
-        return data if isinstance(data, str) and data else "normal"
-
-    def sync_from_config(self) -> None:
-        cfg = self.cfg_mgr.config
-        for toggle, value in (
-            (self.enable_toggle, cfg.wakeup_enabled),
-            (self.chrome_repeat_toggle, cfg.wakeup_chrome_repeat),
-            (self.saver_toggle, cfg.wakeup_saver_enabled),
-            (self.audio_toggle, cfg.wakeup_audio_enabled),
-            (self.target_toggle, cfg.wakeup_target_enabled),
-        ):
-            toggle.blockSignals(True)
-            toggle.setChecked(value)
-            toggle.blockSignals(False)
-        self.audio_list.blockSignals(True)
-        self.audio_list.clear()
-        for url in cfg.wakeup_audio_urls:
-            self.audio_list.addItem(url)
-        self.audio_list.blockSignals(False)
-        self.target_url_edit.blockSignals(True)
-        self.target_url_edit.setText(cfg.wakeup_target_url or "")
-        self.target_url_edit.blockSignals(False)
-        self.chrome_relaunch_spin.blockSignals(True)
-        self.chrome_relaunch_spin.setValue(cfg.wakeup_chrome_relaunch_cooldown_sec)
-        self.chrome_relaunch_spin.blockSignals(False)
-        self.idle_spin.blockSignals(True)
-        self.idle_spin.setValue(cfg.wakeup_idle_to_show_sec)
-        self.idle_spin.blockSignals(False)
-        self.active_spin.blockSignals(True)
-        self.active_spin.setValue(cfg.wakeup_active_threshold_sec)
-        self.active_spin.blockSignals(False)
-        self.poll_spin.blockSignals(True)
-        self.poll_spin.setValue(cfg.wakeup_poll_sec)
-        self.poll_spin.blockSignals(False)
-        audio_mode = (cfg.wakeup_audio_mode or "normal").lower()
-        for i in range(self.audio_mode_combo.count()):
-            if self.audio_mode_combo.itemData(i) == audio_mode:
-                self.audio_mode_combo.blockSignals(True)
-                self.audio_mode_combo.setCurrentIndex(i)
-                self.audio_mode_combo.blockSignals(False)
-                break
-        target_mode = (cfg.wakeup_target_mode or "normal").lower()
-        for i in range(self.target_mode_combo.count()):
-            if self.target_mode_combo.itemData(i) == target_mode:
-                self.target_mode_combo.blockSignals(True)
-                self.target_mode_combo.setCurrentIndex(i)
-                self.target_mode_combo.blockSignals(False)
-                break
-        mode_value = (cfg.wakeup_saver_image_mode or "bundled").lower()
-        for i in range(self.saver_mode_combo.count()):
-            if self.saver_mode_combo.itemData(i) == mode_value:
-                self.saver_mode_combo.blockSignals(True)
-                self.saver_mode_combo.setCurrentIndex(i)
-                self.saver_mode_combo.blockSignals(False)
-                break
-        self._update_saver_path_label()
 
 class DateRangeDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
@@ -3119,6 +2616,12 @@ class EasterEggDialog(QtWidgets.QDialog):
         self.setWindowTitle("AutoClose Secret Studio")
         self.setModal(True)
         self.setMinimumWidth(520)
+        self.setStyleSheet(
+            """
+            QDialog { background-color: #0F172A; }
+            QLabel[popup-role="body"], QLabel[popup-role="hint"] { color: #E2E8F0; }
+            """
+        )
         layout = QtWidgets.QVBoxLayout(self)
         ascii_art = r"""
   █████╗ ██╗   ██╗████████╗ ██████╗   ██████╗██╗      ██████╗ ███████╗███████╗
@@ -3261,6 +2764,13 @@ class TodaySummaryCard(FancyCard):
             self.remote_value.setText("-")
             self.local_value.setText("-")
             return
+        if cfg.holidays_enabled and is_holiday(cfg, today.date()):
+            self.status_value.setText("오늘은 휴일로 등록되어 있어 일정이 실행되지 않습니다")
+            self.time_value.setText("-")
+            self.audio_value.setText("-")
+            self.remote_value.setText("-")
+            self.local_value.setText("-")
+            return
         self.status_value.setText("예정된 일정이 활성화되어 있습니다")
         self.time_value.setText(day_cfg.time)
         if audio_preview:
@@ -3346,82 +2856,6 @@ class StatusOverlay(QtWidgets.QWidget):
         self.show()
 
 
-class ScreenSaverOverlay(QtWidgets.QWidget):
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setStyleSheet("background-color: black;")
-        self._pixmap: Optional[QtGui.QPixmap] = None
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
-        self.image_label = QtWidgets.QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.text_label = QtWidgets.QLabel("화면 보호 모드가 실행 중입니다.")
-        self.text_label.setAlignment(Qt.AlignCenter)
-        self.text_label.setStyleSheet("color: white; font-size: 26px; font-weight: 600;")
-        layout.addStretch(1)
-        layout.addWidget(self.image_label, 1)
-        layout.addWidget(self.text_label, 0)
-        layout.addStretch(1)
-        self.text_label.hide()
-
-    def show_saver(self, image_path: Optional[Path], mode: str = "bundled") -> None:
-        screen = QtGui.QGuiApplication.primaryScreen()
-        if screen:
-            self.setGeometry(screen.geometry())
-        pixmap = None
-        if image_path is not None:
-            pixmap = QtGui.QPixmap(str(image_path))
-        elif mode == "generated":
-            pixmap = self._build_generated_pixmap()
-        if pixmap is not None and not pixmap.isNull():
-            self._pixmap = pixmap
-            self.text_label.hide()
-            self._update_pixmap()
-        else:
-            self._pixmap = None
-            self.image_label.clear()
-            self.text_label.setText("이미지를 불러올 수 없어 기본 안내 화면을 표시합니다.")
-        self.text_label.show()
-        self.showFullScreen()
-
-    def _build_generated_pixmap(self) -> Optional[QtGui.QPixmap]:
-        size = self.size()
-        if size.width() <= 0 or size.height() <= 0:
-            size = QtCore.QSize(1280, 720)
-        pixmap = QtGui.QPixmap(size)
-        pixmap.fill(QtGui.QColor("#0F172A"))
-        painter = QtGui.QPainter(pixmap)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.setPen(QtGui.QColor("white"))
-        font = _build_ui_font(28, QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "화면 보호 모드가 실행 중입니다.")
-        painter.end()
-        return pixmap
-
-    def _update_pixmap(self) -> None:
-        if not self._pixmap:
-            return
-        scaled = self._pixmap.scaled(self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled)
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - UI 이벤트
-        super().resizeEvent(event)
-        self._update_pixmap()
-
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # pragma: no cover - UI 이벤트
-        self.hide()
-        super().keyPressEvent(event)
-
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - UI 이벤트
-        self.hide()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - UI 이벤트
-        self.hide()
-        super().mouseMoveEvent(event)
-
 class DrawerOverlay(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget, on_close: Callable[[], None]) -> None:
         super().__init__(parent)
@@ -3489,6 +2923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tray: Optional[QtWidgets.QSystemTrayIcon] = None
         self._drawer_overlay: Optional[DrawerOverlay] = None
         self._drawer_open = False
+        self._header_logo_trimmed: Optional[QtGui.QPixmap] = None
         self._build_palette()
         initial_icon = self._brand_icon or create_tray_icon(self.cfg_mgr.config.theme_accent)
         self.setWindowIcon(initial_icon)
@@ -3496,6 +2931,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_signals()
         self.scheduler.start()
         self._update_header_logo(self.cfg_mgr.config.header_logo_path)
+        QtCore.QTimer.singleShot(0, self._run_startup_shutdown_if_needed)
 
     def _build_palette(self) -> None:
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
@@ -3568,10 +3004,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 text-decoration: underline;
             }}
             QLabel#HeaderLogo {{
-                background: rgba(255, 255, 255, 0.78);
-                border-radius: 18px;
-                padding: 6px 18px;
-                border: 1px solid {outline_hex};
+                background: transparent;
+                border-radius: 0px;
+                padding: 0px;
+                border: none;
             }}
             QListWidget {{
                 background: #FFFFFF;
@@ -3632,6 +3068,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: {header_bg};
                 border-bottom: 1px solid {outline_hex};
             }}
+            QFrame#TopBar QPushButton {{
+                padding: 6px 12px;
+            }}
         """
         )
 
@@ -3666,7 +3105,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = top_bar
         top_bar.setObjectName("TopBar")
         top_layout = QtWidgets.QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(24, 18, 24, 18)
+        top_layout.setContentsMargins(24, 2, 24, 2)
         top_layout.setSpacing(12)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setObjectName("MenuButton")
@@ -3682,9 +3121,9 @@ class MainWindow(QtWidgets.QMainWindow):
         top_layout.addStretch(1)
         self.logo_container = QtWidgets.QWidget()
         self.logo_container.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred
         )
-        self.logo_container.setMinimumWidth(360)
+        self.logo_container.setMinimumWidth(0)
         logo_layout = QtWidgets.QHBoxLayout(self.logo_container)
         logo_layout.setContentsMargins(0, 0, 0, 0)
         logo_layout.setSpacing(0)
@@ -3692,9 +3131,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logo_label = QtWidgets.QLabel()
         self.logo_label.setObjectName("HeaderLogo")
         self.logo_label.setAlignment(Qt.AlignCenter)
-        self.logo_label.setFixedHeight(64)
-        self.logo_label.setMinimumWidth(280)
-        self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.logo_label.setFixedHeight(88)
+        self.logo_label.setMinimumWidth(0)
+        self.logo_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.logo_label.setCursor(Qt.PointingHandCursor)
         logo_layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
         logo_layout.addStretch(1)
@@ -3791,22 +3230,12 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.addStretch(1)
         settings_page = self._wrap_scroll(settings_wrapper)
 
-        self.wakeup_panel = WakeupSettingsPanel(self.cfg_mgr, self.cfg_mgr.config.theme_accent)
-        wakeup_wrapper = QtWidgets.QWidget()
-        wakeup_layout = QtWidgets.QVBoxLayout(wakeup_wrapper)
-        wakeup_layout.setContentsMargins(24, 20, 24, 24)
-        wakeup_layout.setSpacing(16)
-        wakeup_layout.addWidget(self.wakeup_panel)
-        wakeup_layout.addStretch(1)
-        wakeup_page = self._wrap_scroll(wakeup_wrapper)
-
         page_definitions = [
             ("홈", home_page),
             ("요일 일정", day_page),
             ("플레이리스트", playlist_page),
             ("휴일", holiday_page),
             ("고급 설정", settings_page),
-            ("웨이크업", wakeup_page),
         ]
 
         for name, widget in page_definitions:
@@ -3838,7 +3267,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.assignment_preview,
                 self.holiday_panel,
                 self.settings_panel,
-                self.wakeup_panel,
             ]
         )
         self._set_active_page("홈")
@@ -3929,11 +3357,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mode = mode
         is_admin = mode == "admin"
         self.log_card.setVisible(is_admin)
-        for key in ("휴일", "고급 설정", "웨이크업"):
+        for key in ("휴일", "고급 설정"):
             btn = self._nav_buttons.get(key)
             if btn:
                 btn.setVisible(is_admin)
-        if not is_admin and self.page_title.text() in {"휴일", "고급 설정", "웨이크업"}:
+        if not is_admin and self.page_title.text() in {"휴일", "고급 설정"}:
             self._set_active_page("홈")
         self.admin_exit_button.setVisible(is_admin)
         self.help_button.setToolTip("일반 기능 사용법" if not is_admin else "고급 기능 사용법")
@@ -3956,7 +3384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if button and not button.isChecked():
             button.setChecked(True)
         if self.drawer.isVisible():
-            self.drawer.hide()
+            self._hide_drawer()
 
     def _preview_audio_for_today(self) -> Optional[str]:
         cfg = self.cfg_mgr.config
@@ -3972,6 +3400,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_today_summary(self) -> None:
         self.today_card.update_from_config(self.cfg_mgr.config, self._preview_audio_for_today())
+
+    def _run_startup_shutdown_if_needed(self) -> None:
+        cfg = self.cfg_mgr.config
+        today = datetime.now().date()
+        day_key = DAY_KEYS[today.weekday()]
+        day_cfg = cfg.days.get(day_key)
+        if not day_cfg:
+            return
+        if is_service_day(cfg, day_cfg, today):
+            return
+        reason = "휴일" if cfg.holidays_enabled and is_holiday(cfg, today) else "비활성 요일"
+        allow_remote = cfg.enable_remote_shutdown and day_cfg.allow_remote
+        allow_local = cfg.enable_local_shutdown and day_cfg.allow_local_shutdown
+        if not allow_remote and not allow_local:
+            return
+        if allow_remote:
+            hosts = [host.get("host", "") for host in cfg.remote_hosts if host.get("host")]
+            detail = ", ".join(hosts) if hosts else "등록된 대상 없음"
+            self._append_shutdown_log("원격 종료", f"{reason} 자동 종료: {detail}")
+            threading.Thread(target=shutdown_remote, args=(cfg.remote_hosts,), daemon=True).start()
+        if allow_local:
+            self._append_shutdown_log(
+                "본체 종료",
+                f"{reason} 자동 종료 - {cfg.shutdown_delay}초 후 종료",
+            )
+            threading.Thread(target=shutdown_local, args=(cfg.shutdown_delay,), daemon=True).start()
 
     def _append_shutdown_log(self, kind: str, detail: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -4053,14 +3507,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.assignment_preview.refresh()
         self.holiday_panel.refresh()
         self.settings_panel.sync_from_config()
-        self.wakeup_panel.sync_from_config()
         for card in self.day_cards.values():
             card.sync_from_config()
         self._update_today_summary()
         self.log_card.update_logs(cfg.shutdown_logs)
         self.scheduler._compute_next_run()
-        if getattr(self, "_wakeup_timer", None) and self._wakeup_timer.isActive():
-            self._wakeup_timer.setInterval(max(100, int(cfg.wakeup_poll_sec * 1000)))
 
     def _generate_header_logo(self) -> QtGui.QPixmap:
         width, height = 320, 56
@@ -4162,37 +3613,56 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_header_logo(self, path: Optional[str]) -> None:
         pixmap: Optional[QtGui.QPixmap] = None
-        tooltip = "상단 바에 표시할 로고 이미지를 고급 설정에서 선택하세요."
-        if path:
-            candidate_path = Path(path)
-            if candidate_path.exists():
-                candidate = QtGui.QPixmap(str(candidate_path))
-                if not candidate.isNull():
-                    pixmap = candidate
-                    tooltip = str(candidate_path)
+        tooltip = "기본 로고(topbar_logo.png)가 적용되었습니다."
+        if DEFAULT_HEADER_LOGO.exists():
+            candidate = QtGui.QPixmap(str(DEFAULT_HEADER_LOGO))
+            if not candidate.isNull():
+                pixmap = candidate
         if pixmap is None:
-            if DEFAULT_HEADER_LOGO.exists():
-                candidate = QtGui.QPixmap(str(DEFAULT_HEADER_LOGO))
-                if not candidate.isNull():
-                    pixmap = candidate
-                    tooltip = "기본 로고(topbar_logo.png)가 적용되었습니다."
-            if pixmap is None:
-                pixmap = self._generate_header_logo()
-                tooltip = "기본 전원 로고가 적용되었습니다. 고급 설정에서 이미지를 교체할 수 있습니다."
-        target_size = self.logo_label.size()
-        if target_size.width() <= 0 or target_size.height() <= 0:
-            target_size = QtCore.QSize(320, 56)
-        scaled = pixmap.scaled(target_size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            pixmap = self._generate_header_logo()
+            tooltip = "기본 전원 로고가 적용되었습니다."
+        if self._header_logo_trimmed is None:
+            self._header_logo_trimmed = self._trim_transparent(pixmap)
+        trimmed = self._header_logo_trimmed
+        target_height = self.logo_label.height() or 88
+        scaled = trimmed.scaledToHeight(target_height, Qt.SmoothTransformation)
         self.logo_label.setPixmap(scaled)
-        self.logo_label.setScaledContents(True)
+        self.logo_label.setScaledContents(False)
+        target_width = max(1, scaled.width())
+        self.logo_label.setFixedWidth(target_width)
+        if self.logo_container:
+            self.logo_container.setFixedWidth(target_width)
         self.logo_label.setToolTip(tooltip)
+
+    @staticmethod
+    def _trim_transparent(src: QtGui.QPixmap) -> QtGui.QPixmap:
+        image = src.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
+        width = image.width()
+        height = image.height()
+        min_x, min_y = width, height
+        max_x, max_y = 0, 0
+        has_alpha = False
+        for y in range(height):
+            for x in range(width):
+                alpha = QtGui.qAlpha(image.pixel(x, y))
+                if alpha > 0:
+                    has_alpha = True
+                    min_x = min(min_x, x)
+                    min_y = min(min_y, y)
+                    max_x = max(max_x, x)
+                    max_y = max(max_y, y)
+        if not has_alpha:
+            return src
+        if min_x > max_x or min_y > max_y:
+            return src
+        return src.copy(QtCore.QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if obj is self.page_title and event.type() == QtCore.QEvent.MouseButtonPress:
             if self._locked or self._mode == "admin":
                 return super().eventFilter(obj, event)
             if isinstance(event, QtGui.QMouseEvent) and event.button() == Qt.LeftButton:
-                if not self._secret_timer.isValid() or self._secret_timer.elapsed() > 2500:
+                if not self._secret_timer.isValid() or self._secret_timer.elapsed() > 4500:
                     self._secret_clicks = 0
                     self._secret_timer.start()
                 self._secret_clicks += 1
@@ -4214,6 +3684,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_from_tray()
 
     def _on_tray_activated(self, reason: QtWidgets.QSystemTrayIcon.ActivationReason) -> None:
+        if QtWidgets.QApplication.mouseButtons() & Qt.RightButton:
+            return
         if reason in (QtWidgets.QSystemTrayIcon.Trigger, QtWidgets.QSystemTrayIcon.DoubleClick):
             self._handle_tray_show()
 
@@ -4244,6 +3716,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        self.setWindowState(self.windowState() | Qt.WindowActive)
+        QtCore.QTimer.singleShot(0, self.activateWindow)
 
     def _hide_to_tray(self, *, notify: bool = False) -> None:
         self._set_taskbar_visibility(False)
@@ -4378,6 +3852,14 @@ class MainWindow(QtWidgets.QMainWindow):
 class App(QtWidgets.QApplication):
     def __init__(self, argv: List[str]) -> None:
         super().__init__(argv)
+        self._instance_guard = QtCore.QSharedMemory(f"{ORGANIZATION_DOMAIN}.{APP_NAME}")
+        if self._instance_guard.attach():
+            self._already_running = True
+            return
+        if not self._instance_guard.create(1):
+            self._already_running = True
+            return
+        self._already_running = False
         QtCore.QCoreApplication.setApplicationName(APP_NAME)
         QtCore.QCoreApplication.setApplicationVersion(APP_VERSION)
         QtCore.QCoreApplication.setOrganizationName(ORGANIZATION_NAME)
@@ -4395,17 +3877,10 @@ class App(QtWidgets.QApplication):
         self.window.admin_login_requested.connect(self._show_admin_login)
         self.window.help_requested.connect(self._show_help)
         self._login_dialog_open = False
-        self._boot_sequence_started = False
-        self._screensaver_overlay: Optional[ScreenSaverOverlay] = None
-        self._idle_detector = IdleTimeDetector()
-        self._wakeup_timer: Optional[QtCore.QTimer] = None
-        self._audio_process: Optional[subprocess.Popen] = None
-        self._target_process: Optional[subprocess.Popen] = None
-        self._last_audio_launch: Optional[float] = None
-        self._last_target_launch: Optional[float] = None
-        self._pending_target_timer: Optional[QtCore.QTimer] = None
-        self._show_user_login(initial=True)
-        self._schedule_boot_sequence()
+        QtCore.QTimer.singleShot(0, self.window._hide_to_tray)
+
+    def is_already_running(self) -> bool:
+        return getattr(self, "_already_running", False)
 
     def _show_user_login(self, *, initial: bool) -> None:
         if not self.window.is_locked():
@@ -4419,6 +3894,9 @@ class App(QtWidgets.QApplication):
             lambda pw: verify_password(self.cfg_mgr.config.user_password_hash, pw),
             parent=self.window,
         )
+        prompt.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        prompt.raise_()
+        prompt.activateWindow()
         result = prompt.exec()
         self._login_dialog_open = False
         if result == QtWidgets.QDialog.Accepted:
@@ -4465,10 +3943,9 @@ class App(QtWidgets.QApplication):
         if mode == "admin":
             lines = [
                 "관리자 모드는 상단 제목(상단 바의 현재 페이지 이름)을 5회 연속 클릭하면 로그인 창이 나타납니다.",
-                "로그인 후 '휴일', '고급 설정', '웨이크업' 페이지가 열리며, 원격 종료·부팅 웨이크업 등을 관리할 수 있습니다.",
+                "로그인 후 '휴일', '고급 설정' 페이지가 열리며, 원격 종료 등을 관리할 수 있습니다.",
                 "휴일 목록에서는 날짜나 기간을 추가하고 선택한 항목을 삭제할 수 있으며, 우클릭으로도 삭제할 수 있습니다.",
                 "고급 설정에서 일반/관리자 비밀번호를 변경하고 원격 PC 목록, 테마, 시작 프로그램 등록을 조정하세요.",
-                "웨이크업 설정에서 유튜브 음원 링크 목록, 특정 주소 URL, 열기 모드(일반/전체화면/키오스크), 세이버 옵션을 구성할 수 있습니다.",
                 "관리자 모드 종료 버튼을 누르면 일반 모드로 돌아갑니다. 잠금 버튼은 창을 숨기고 다시 로그인하도록 합니다.",
             ]
             title = "고급 기능 도움말"
@@ -4484,146 +3961,9 @@ class App(QtWidgets.QApplication):
         dialog = HelpDialog(title, lines, parent=self.window)
         dialog.exec()
 
-    def _schedule_boot_sequence(self) -> None:
-        if self._boot_sequence_started:
-            return
-        self._boot_sequence_started = True
-        QtCore.QTimer.singleShot(1500, self._run_boot_sequence)
-
-    def _run_boot_sequence(self) -> None:
-        cfg = self.cfg_mgr.config
-        today = date.today()
-        day_key = DAY_KEYS[today.weekday()]
-        day_cfg = cfg.days.get(day_key, DaySchedule())
-        if not is_service_day(cfg, day_cfg, today):
-            self._run_non_service_shutdown(cfg, day_key)
-            return
-        if not cfg.wakeup_enabled:
-            return
-        self._start_wakeup_sequence(cfg)
-
-    def _run_non_service_shutdown(self, cfg: SchedulerConfig, day_key: str) -> None:
-        day_label = DAY_LABEL.get(day_key, day_key)
-        if cfg.enable_remote_shutdown:
-            hosts = [host.get("host", "") for host in cfg.remote_hosts if host.get("host")]
-            detail = ", ".join(hosts) if hosts else "등록된 대상 없음"
-            self.window._append_shutdown_log("원격 종료", f"부팅 미사용일({day_label}): {detail}")
-            threading.Thread(target=shutdown_remote, args=(cfg.remote_hosts,), daemon=True).start()
-        if cfg.enable_local_shutdown:
-            self.window._append_shutdown_log(
-                "본체 종료",
-                f"부팅 미사용일({day_label}): {cfg.shutdown_delay}초 후 종료",
-            )
-            threading.Thread(target=shutdown_local, args=(cfg.shutdown_delay,), daemon=True).start()
-        if self.window.tray:
-            self.window.tray.showMessage(
-                APP_NAME,
-                f"오늘은 실행일이 아니어서 종료 절차를 진행합니다 ({day_label}).",
-                QtWidgets.QSystemTrayIcon.Information,
-                3000,
-            )
-
-    def _start_wakeup_sequence(self, cfg: SchedulerConfig) -> None:
-        self._launch_audio_window(cfg)
-        self._schedule_target_window(cfg)
-        self._start_wakeup_monitor()
-
-    def _show_screensaver(self) -> None:
-        cfg = self.cfg_mgr.config
-        image_path, mode = resolve_screensaver_image(cfg)
-        if self._screensaver_overlay is None:
-            self._screensaver_overlay = ScreenSaverOverlay()
-        self._screensaver_overlay.show_saver(image_path, mode)
-
-    def _start_wakeup_monitor(self) -> None:
-        cfg = self.cfg_mgr.config
-        if self._wakeup_timer is None:
-            self._wakeup_timer = QtCore.QTimer(self)
-            self._wakeup_timer.timeout.connect(self._tick_wakeup_monitor)
-        interval_ms = max(100, int(cfg.wakeup_poll_sec * 1000))
-        self._wakeup_timer.setInterval(interval_ms)
-        if not self._wakeup_timer.isActive():
-            self._wakeup_timer.start()
-
-    def _tick_wakeup_monitor(self) -> None:
-        cfg = self.cfg_mgr.config
-        if not cfg.wakeup_enabled:
-            if self._wakeup_timer and self._wakeup_timer.isActive():
-                self._wakeup_timer.stop()
-            if self._screensaver_overlay:
-                self._screensaver_overlay.hide()
-            return
-        if getattr(self.window, "_playback_mode", "idle") == "schedule":
-            return
-        idle_sec = self._idle_detector.seconds_since_last_input()
-        if cfg.wakeup_saver_enabled:
-            if idle_sec >= cfg.wakeup_idle_to_show_sec:
-                if not (self._screensaver_overlay and self._screensaver_overlay.isVisible()):
-                    self._show_screensaver()
-            elif self._screensaver_overlay and self._screensaver_overlay.isVisible():
-                if idle_sec <= cfg.wakeup_active_threshold_sec:
-                    self._screensaver_overlay.hide()
-        if cfg.wakeup_chrome_repeat:
-            self._ensure_window_running(cfg)
-
-    def _launch_audio_window(self, cfg: SchedulerConfig) -> None:
-        if not cfg.wakeup_audio_enabled or not cfg.wakeup_audio_urls:
-            return
-        url = self._pick_audio_url(cfg)
-        if not url:
-            return
-        mode = (cfg.wakeup_audio_mode or "normal").lower()
-        profile_root = self.cfg_mgr.storage_directory() / "chrome_profiles" / "audio"
-        self._audio_process = launch_chrome_window(
-            url,
-            profile_root,
-            fullscreen=mode == "fullscreen",
-            kiosk=mode == "kiosk",
-        )
-        self._last_audio_launch = time.monotonic()
-
-    def _schedule_target_window(self, cfg: SchedulerConfig) -> None:
-        if not cfg.wakeup_target_enabled or not (cfg.wakeup_target_url or "").strip():
-            return
-        if self._pending_target_timer is None:
-            self._pending_target_timer = QtCore.QTimer(self)
-            self._pending_target_timer.setSingleShot(True)
-            self._pending_target_timer.timeout.connect(lambda: self._launch_target_window(self.cfg_mgr.config))
-        self._pending_target_timer.start(1200)
-
-    def _launch_target_window(self, cfg: SchedulerConfig) -> None:
-        if not cfg.wakeup_target_enabled or not (cfg.wakeup_target_url or "").strip():
-            return
-        mode = (cfg.wakeup_target_mode or "normal").lower()
-        profile_root = self.cfg_mgr.storage_directory() / "chrome_profiles" / "target"
-        self._target_process = launch_chrome_window(
-            cfg.wakeup_target_url,
-            profile_root,
-            fullscreen=mode == "fullscreen",
-            kiosk=mode == "kiosk",
-        )
-        self._last_target_launch = time.monotonic()
-
-    def _pick_audio_url(self, cfg: SchedulerConfig) -> str:
-        if not cfg.wakeup_audio_urls:
-            return ""
-        return random.choice(cfg.wakeup_audio_urls)
-
-    def _ensure_window_running(self, cfg: SchedulerConfig) -> None:
-        cooldown = max(1.0, float(cfg.wakeup_chrome_relaunch_cooldown_sec))
-        now = time.monotonic()
-        if cfg.wakeup_audio_enabled and cfg.wakeup_audio_urls:
-            if self._audio_process and self._audio_process.poll() is None:
-                pass
-            elif self._last_audio_launch is None or (now - self._last_audio_launch) >= cooldown:
-                self._launch_audio_window(cfg)
-        if cfg.wakeup_target_enabled and (cfg.wakeup_target_url or "").strip():
-            if self._target_process and self._target_process.poll() is None:
-                pass
-            elif self._last_target_launch is None or (now - self._last_target_launch) >= cooldown:
-                self._launch_target_window(cfg)
-
 
 if __name__ == "__main__":
     app = App(sys.argv)
+    if app.is_already_running():
+        sys.exit(0)
     sys.exit(app.exec())
