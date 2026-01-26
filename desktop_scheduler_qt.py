@@ -62,6 +62,7 @@ ORGANIZATION_NAME = "AutoClose Studio"
 ORGANIZATION_DOMAIN = "autoclose.local"
 DEFAULT_USER_PASSWORD = "0000"
 DEFAULT_ADMIN_PASSWORD = "000000"
+STARTUP_SHUTDOWN_GRACE_SEC = 90
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -2928,6 +2929,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._drawer_overlay: Optional[DrawerOverlay] = None
         self._drawer_open = False
         self._header_logo_trimmed: Optional[QtGui.QPixmap] = None
+        self._startup_shutdown_timer = QtCore.QTimer(self)
+        self._startup_shutdown_timer.setSingleShot(True)
+        self._startup_shutdown_timer.timeout.connect(self._execute_startup_shutdowns)
+        self._startup_shutdown_payload: Optional[Tuple[str, bool, bool]] = None
         self._build_palette()
         initial_icon = self._brand_icon or create_tray_icon(self.cfg_mgr.config.theme_accent)
         self.setWindowIcon(initial_icon)
@@ -3351,6 +3356,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_mode("user")
             self.overlay.hide()
             self._hide_to_tray()
+        else:
+            self._cancel_startup_shutdown("로그인으로 자동 종료를 취소합니다.")
 
     def is_locked(self) -> bool:
         return self._locked
@@ -3419,6 +3426,29 @@ class MainWindow(QtWidgets.QMainWindow):
         allow_local = cfg.enable_local_shutdown and day_cfg.allow_local_shutdown
         if not allow_remote and not allow_local:
             return
+        self._startup_shutdown_payload = (reason, allow_remote, allow_local)
+        self._startup_shutdown_timer.start(STARTUP_SHUTDOWN_GRACE_SEC * 1000)
+        message = f"{reason}이라 {STARTUP_SHUTDOWN_GRACE_SEC}초 후 자동 종료를 실행합니다."
+        if self.tray:
+            self.tray.showMessage(APP_NAME, message, QtWidgets.QSystemTrayIcon.Warning, 5000)
+        else:
+            show_warning_message(self, "자동 종료 대기", message)
+
+    def _cancel_startup_shutdown(self, reason: str) -> None:
+        if not self._startup_shutdown_payload:
+            return
+        self._startup_shutdown_timer.stop()
+        self._startup_shutdown_payload = None
+        if self.tray:
+            self.tray.showMessage(APP_NAME, reason, QtWidgets.QSystemTrayIcon.Information, 4000)
+
+    def _execute_startup_shutdowns(self) -> None:
+        payload = self._startup_shutdown_payload
+        self._startup_shutdown_payload = None
+        if not payload:
+            return
+        reason, allow_remote, allow_local = payload
+        cfg = self.cfg_mgr.config
         if allow_remote:
             hosts = [host.get("host", "") for host in cfg.remote_hosts if host.get("host")]
             detail = ", ".join(hosts) if hosts else "등록된 대상 없음"
@@ -3716,6 +3746,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.setWindowFlag(Qt.Tool, True)
 
     def _show_from_tray(self) -> None:
+        self._cancel_startup_shutdown("프로그램 창이 열려 자동 종료를 취소합니다.")
         self._set_taskbar_visibility(True)
         self.showNormal()
         self.raise_()
