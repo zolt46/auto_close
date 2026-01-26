@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import atexit
+import ctypes
 import hashlib
 import html
 import json
@@ -33,6 +34,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import argparse
+import textwrap
 from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -4033,6 +4037,13 @@ class App(QtWidgets.QApplication):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--saver-only", action="store_true")
+    parser.add_argument("--mode", default="bundled")
+    parser.add_argument("--image", default=None)
+    args, _ = parser.parse_known_args()
+    if args.saver_only:
+        sys.exit(_run_screensaver_only(args.image, args.mode))
     app = App(sys.argv)
     if app.is_already_running():
         sys.exit(0)
