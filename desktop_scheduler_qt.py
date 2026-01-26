@@ -241,7 +241,7 @@ class DaySchedule:
     audio_path: Optional[str] = None
     allow_remote: bool = True
     allow_local_shutdown: bool = True
-    last_ran: Optional[str] = None  # yyyy-mm-dd
+    last_ran: Optional[str] = None  # ISO datetime
 
     def as_dict(self) -> Dict[str, object]:
         data = asdict(self)
@@ -433,12 +433,30 @@ def is_holiday(cfg: SchedulerConfig, target: date) -> bool:
     return False
 
 
+def _parse_last_ran(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def has_run_for_schedule(day_cfg: DaySchedule, scheduled: datetime) -> bool:
+    last_ran = _parse_last_ran(day_cfg.last_ran)
+    if last_ran is None:
+        return False
+    return last_ran >= scheduled
+
+
 def is_day_eligible(cfg: SchedulerConfig, day_cfg: DaySchedule, current_date: date) -> bool:
     if not day_cfg.enabled:
         return False
     if cfg.holidays_enabled and is_holiday(cfg, current_date):
-        return False
-    if day_cfg.last_ran == current_date.isoformat():
         return False
     return True
 
@@ -478,6 +496,8 @@ def compute_upcoming_runs(cfg: SchedulerConfig, horizon_days: int = 28, limit: O
         except Exception:
             continue
         scheduled = current.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if has_run_for_schedule(day_cfg, scheduled):
+            continue
         if scheduled < now:
             continue
         if day_cfg.auto_assign and playlist_len:
@@ -621,7 +641,7 @@ class SchedulerEngine(QtCore.QObject):
         self.cfg_mgr = cfg_mgr
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._last_trigger_marker: Optional[Tuple[str, date]] = None
+        self._last_trigger_marker: Optional[Tuple[str, datetime]] = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -657,15 +677,18 @@ class SchedulerEngine(QtCore.QObject):
         cfg = self.cfg_mgr.config
         day_key = DAY_KEYS[now.weekday()]
         day_cfg = cfg.days[day_key]
-        if day_cfg.last_ran != now.date().isoformat():
+        last_ran = _parse_last_ran(day_cfg.last_ran)
+        if not last_ran or last_ran.date() != now.date():
             self._last_trigger_marker = None
         if not self._is_day_eligible(cfg, day_cfg, now.date()):
             return
         hh, mm = map(int, day_cfg.time.split(":"))
         target_time = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if has_run_for_schedule(day_cfg, target_time):
+            return
         delta = (now - target_time).total_seconds()
         if 0 <= delta <= 30:
-            marker = (day_key, now.date())
+            marker = (day_key, target_time)
             if self._last_trigger_marker == marker:
                 return
             self._last_trigger_marker = marker
@@ -676,7 +699,9 @@ class SchedulerEngine(QtCore.QObject):
                 cfg.enable_remote_shutdown and day_cfg.allow_remote,
                 cfg.enable_local_shutdown and day_cfg.allow_local_shutdown,
             )
-            self.cfg_mgr.update(lambda c: c.days[day_key].__setattr__("last_ran", now.date().isoformat()))
+            self.cfg_mgr.update(
+                lambda c: c.days[day_key].__setattr__("last_ran", now.replace(microsecond=0).isoformat())
+            )
 
     def _resolve_audio(self, cfg: SchedulerConfig, day_cfg: DaySchedule) -> Optional[str]:
         if not day_cfg.auto_assign and day_cfg.audio_path:
@@ -862,13 +887,17 @@ def shutdown_remote(
                 ssh_commands = _collect_ssh_commands()
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                password = (host.get("password") or "").strip()
+                key_path = (host.get("key_path") or "").strip()
+                key_filename = str(Path(key_path).expanduser()) if key_path else None
                 ssh.connect(
                     hostname=target,
                     username=host.get("username") or None,
-                    password=host.get("password") or None,
+                    password=password or None,
                     timeout=10,
-                    look_for_keys=False,
-                    allow_agent=False,
+                    look_for_keys=not password,
+                    allow_agent=not password,
+                    key_filename=key_filename,
                 )
 
                 errors: List[str] = []
@@ -2739,6 +2768,13 @@ class TodaySummaryCard(FancyCard):
             self.remote_value.setText("-")
             self.local_value.setText("-")
             return
+        if cfg.holidays_enabled and is_holiday(cfg, today.date()):
+            self.status_value.setText("오늘은 휴일로 등록되어 있어 일정이 실행되지 않습니다")
+            self.time_value.setText("-")
+            self.audio_value.setText("-")
+            self.remote_value.setText("-")
+            self.local_value.setText("-")
+            return
         self.status_value.setText("예정된 일정이 활성화되어 있습니다")
         self.time_value.setText(day_cfg.time)
         if audio_preview:
@@ -2899,6 +2935,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_signals()
         self.scheduler.start()
         self._update_header_logo(self.cfg_mgr.config.header_logo_path)
+        QtCore.QTimer.singleShot(0, self._run_startup_shutdown_if_needed)
 
     def _build_palette(self) -> None:
         accent = QtGui.QColor(self.cfg_mgr.config.theme_accent)
@@ -3367,6 +3404,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_today_summary(self) -> None:
         self.today_card.update_from_config(self.cfg_mgr.config, self._preview_audio_for_today())
+
+    def _run_startup_shutdown_if_needed(self) -> None:
+        cfg = self.cfg_mgr.config
+        today = datetime.now().date()
+        day_key = DAY_KEYS[today.weekday()]
+        day_cfg = cfg.days.get(day_key)
+        if not day_cfg:
+            return
+        if is_service_day(cfg, day_cfg, today):
+            return
+        reason = "휴일" if cfg.holidays_enabled and is_holiday(cfg, today) else "비활성 요일"
+        allow_remote = cfg.enable_remote_shutdown and day_cfg.allow_remote
+        allow_local = cfg.enable_local_shutdown and day_cfg.allow_local_shutdown
+        if not allow_remote and not allow_local:
+            return
+        if allow_remote:
+            hosts = [host.get("host", "") for host in cfg.remote_hosts if host.get("host")]
+            detail = ", ".join(hosts) if hosts else "등록된 대상 없음"
+            self._append_shutdown_log("원격 종료", f"{reason} 자동 종료: {detail}")
+            threading.Thread(target=shutdown_remote, args=(cfg.remote_hosts,), daemon=True).start()
+        if allow_local:
+            self._append_shutdown_log(
+                "본체 종료",
+                f"{reason} 자동 종료 - {cfg.shutdown_delay}초 후 종료",
+            )
+            threading.Thread(target=shutdown_local, args=(cfg.shutdown_delay,), daemon=True).start()
 
     def _append_shutdown_log(self, kind: str, detail: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -3901,13 +3964,6 @@ class App(QtWidgets.QApplication):
             title = "일반 기능 도움말"
         dialog = HelpDialog(title, lines, parent=self.window)
         dialog.exec()
-
-
-def _run_screensaver_only(image_path: Optional[str], mode: str) -> int:
-    app = QtWidgets.QApplication(sys.argv)
-    overlay = ScreenSaverOverlay()
-    overlay.show_saver(Path(image_path) if image_path else None, mode)
-    return app.exec()
 
 
 if __name__ == "__main__":
