@@ -1807,7 +1807,7 @@ class SettingsPanel(FancyCard):
         outer = QtWidgets.QVBoxLayout()
         outer.setSpacing(16)
         self.target_edit = QtWidgets.QLineEdit(", ".join(cfg_mgr.config.targets))
-        self.target_picker_btn = QtWidgets.QPushButton("실행 중 프로그램 추가")
+        self.target_picker_btn = QtWidgets.QPushButton("프로그램 추가")
         self.target_picker_btn.setCursor(Qt.PointingHandCursor)
         self.remote_toggle = StyledToggle()
         self.remote_toggle.setChecked(cfg_mgr.config.enable_remote_shutdown)
@@ -1958,15 +1958,20 @@ class SettingsPanel(FancyCard):
         self.holiday_delay_spin.setEnabled(enabled)
 
     def _open_target_picker(self) -> None:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "종료 대상 프로그램 선택",
+            str(Path.home()),
+            "Executable Files (*.exe);;All Files (*)",
+        )
+        if not paths:
+            return
         current = [p.strip() for p in self.target_edit.text().split(",") if p.strip()]
-        dialog = ProcessPickerDialog(current, parent=self)
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        selected = dialog.selected_names()
-        if not selected:
-            return
         merged = current[:]
-        for name in selected:
+        for path in paths:
+            name = Path(path).name
+            if not name:
+                continue
             if name not in merged:
                 merged.append(name)
         if not merged:
@@ -2655,80 +2660,6 @@ class HelpDialog(QtWidgets.QDialog):
         _apply_popup_typography(self)
 
 
-class ProcessPickerDialog(QtWidgets.QDialog):
-    def __init__(self, selected: List[str], parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("실행 중 프로그램 선택")
-        self.setModal(True)
-        self.setMinimumWidth(520)
-        self._selected = selected
-        layout = QtWidgets.QVBoxLayout(self)
-        guide = QtWidgets.QLabel("현재 실행 중인 프로그램 목록에서 종료 대상에 추가할 항목을 선택하세요.")
-        guide.setWordWrap(True)
-        guide.setProperty("popup-role", "body")
-        layout.addWidget(guide)
-        self.list_widget = QtWidgets.QListWidget()
-        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.list_widget.setAlternatingRowColors(True)
-        layout.addWidget(self.list_widget, 1)
-        self.add_file_btn = QtWidgets.QPushButton("EXE 파일 추가")
-        self.add_file_btn.setCursor(Qt.PointingHandCursor)
-        self.add_file_btn.clicked.connect(self._add_exe_files)
-        layout.addWidget(self.add_file_btn)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self._populate(selected)
-        _apply_popup_typography(self)
-
-    def _populate(self, selected: List[str]) -> None:
-        existing = {name.lower() for name in selected}
-        names: List[str] = []
-        for proc in psutil.process_iter(attrs=["name"]):
-            name = proc.info.get("name")
-            if not name:
-                continue
-            cleaned = name.strip()
-            if cleaned and cleaned not in names:
-                names.append(cleaned)
-        names.sort(key=lambda value: value.lower())
-        for name in names:
-            item = QtWidgets.QListWidgetItem(name)
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if name.lower() in existing else Qt.Unchecked)
-            self.list_widget.addItem(item)
-
-    def _add_exe_files(self) -> None:
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self,
-            "종료 대상 프로그램 선택",
-            str(Path.home()),
-            "Executable Files (*.exe);;All Files (*)",
-        )
-        if not paths:
-            return
-        existing = {self.list_widget.item(i).text().lower() for i in range(self.list_widget.count())}
-        for path in paths:
-            name = Path(path).name
-            if not name:
-                continue
-            if name.lower() in existing:
-                continue
-            existing.add(name.lower())
-            item = QtWidgets.QListWidgetItem(name)
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            self.list_widget.addItem(item)
-
-    def selected_names(self) -> List[str]:
-        selections: List[str] = []
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            if item.checkState() == Qt.Checked:
-                selections.append(item.text())
-        return selections
-
 class TerminalLogDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2809,7 +2740,8 @@ class EasterEggDialog(QtWidgets.QDialog):
         self.setMinimumWidth(520)
         self.setStyleSheet(
             """
-            QDialog { background-color: #0B1524; }
+            QDialog { background-color: #0F172A; }
+            QLabel { background-color: transparent; }
             QLabel[popup-role="body"], QLabel[popup-role="hint"] { color: #E2E8F0; }
             """
         )
