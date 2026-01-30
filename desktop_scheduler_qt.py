@@ -2809,7 +2809,7 @@ class EasterEggDialog(QtWidgets.QDialog):
         self.setMinimumWidth(520)
         self.setStyleSheet(
             """
-            QDialog { background-color: #0F172A; }
+            QDialog { background-color: #0B1524; }
             QLabel[popup-role="body"], QLabel[popup-role="hint"] { color: #E2E8F0; }
             """
         )
