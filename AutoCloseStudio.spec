@@ -13,8 +13,8 @@ import PySide6
 
 block_cipher = None
 
-ROOT = Path(r"C:\Users\seewo\Desktop\closing_new_proj")
-SRC_DIR = ROOT / "auto_close"
+ROOT = Path(r"C:\Users\seewo\Desktop\closing_new_proj\auto_close")
+SRC_DIR = ROOT / "auto_close_git"
 ASSET_DIR = SRC_DIR / "assets"
 PYSIDE_PLUGINS = Path(PySide6.__file__).resolve().parent / "plugins"
 
