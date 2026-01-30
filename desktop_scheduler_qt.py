@@ -2738,11 +2738,16 @@ class EasterEggDialog(QtWidgets.QDialog):
         self.setWindowTitle("AutoClose Secret Studio")
         self.setModal(True)
         self.setMinimumWidth(520)
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor("#0F172A"))
+        palette.setColor(QPalette.WindowText, QColor("#FFFFFF"))
+        self.setPalette(palette)
         self.setStyleSheet(
             """
             QDialog { background-color: #0F172A; }
             QLabel { background-color: transparent; }
-            QLabel[popup-role="body"], QLabel[popup-role="hint"] { color: #E2E8F0; }
+            QLabel[popup-role="body"], QLabel[popup-role="hint"] { color: #FFFFFF; }
             """
         )
         layout = QtWidgets.QVBoxLayout(self)
@@ -2768,6 +2773,7 @@ class EasterEggDialog(QtWidgets.QDialog):
         )
         label.setAlignment(Qt.AlignCenter)
         label.setTextFormat(Qt.RichText)
+        label.setStyleSheet("color: #FFFFFF; background-color: transparent;")
         layout.addWidget(label)
         message = QtWidgets.QLabel(
             "숨은 공방을 찾아내셨군요!\n"
@@ -2776,6 +2782,7 @@ class EasterEggDialog(QtWidgets.QDialog):
         message.setAlignment(Qt.AlignCenter)
         message.setWordWrap(True)
         message.setProperty("popup-role", "body")
+        message.setStyleSheet("color: #FFFFFF;")
         layout.addWidget(message)
         quote = QtWidgets.QLabel(
             "<i>“코드를 닫을 때마다 또 다른 아이디어가 부팅됩니다.”<br>"
@@ -2785,7 +2792,7 @@ class EasterEggDialog(QtWidgets.QDialog):
         quote.setWordWrap(True)
         quote.setTextFormat(Qt.RichText)
         quote.setProperty("popup-role", "hint")
-        quote.setStyleSheet("font-size: 15px; font-weight: 700;")
+        quote.setStyleSheet("font-size: 15px; font-weight: 700; color: #FFFFFF;")
         layout.addWidget(quote)
         close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         close_btn.rejected.connect(self.reject)
