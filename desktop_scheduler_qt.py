@@ -2738,6 +2738,8 @@ class EasterEggDialog(QtWidgets.QDialog):
         self.setWindowTitle("AutoClose Secret Studio")
         self.setModal(True)
         self.setMinimumWidth(520)
+        layout = QtWidgets.QVBoxLayout(self)
+        _apply_popup_typography(self)
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor("#0F172A"))
@@ -2750,7 +2752,6 @@ class EasterEggDialog(QtWidgets.QDialog):
             QLabel[popup-role="body"], QLabel[popup-role="hint"] { color: #FFFFFF; }
             """
         )
-        layout = QtWidgets.QVBoxLayout(self)
         icon = _load_brand_icon()
         if icon is not None and not icon.isNull():
             icon_label = QtWidgets.QLabel()
@@ -2798,7 +2799,6 @@ class EasterEggDialog(QtWidgets.QDialog):
         close_btn.rejected.connect(self.reject)
         close_btn.accepted.connect(self.accept)
         layout.addWidget(close_btn)
-        _apply_popup_typography(self)
 
 
 class DashboardCard(FancyCard):
