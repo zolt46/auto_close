@@ -55,7 +55,7 @@ from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 BUILD_DATE = "2025-11-06"
 AUTHOR_NAME = "Zolt46 - PSW - Emanon108"
 ORGANIZATION_NAME = "AutoClose Studio"
@@ -2661,6 +2661,7 @@ class ProcessPickerDialog(QtWidgets.QDialog):
         self.setWindowTitle("실행 중 프로그램 선택")
         self.setModal(True)
         self.setMinimumWidth(520)
+        self._selected = selected
         layout = QtWidgets.QVBoxLayout(self)
         guide = QtWidgets.QLabel("현재 실행 중인 프로그램 목록에서 종료 대상에 추가할 항목을 선택하세요.")
         guide.setWordWrap(True)
@@ -2670,6 +2671,10 @@ class ProcessPickerDialog(QtWidgets.QDialog):
         self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.list_widget.setAlternatingRowColors(True)
         layout.addWidget(self.list_widget, 1)
+        self.add_file_btn = QtWidgets.QPushButton("EXE 파일 추가")
+        self.add_file_btn.setCursor(Qt.PointingHandCursor)
+        self.add_file_btn.clicked.connect(self._add_exe_files)
+        layout.addWidget(self.add_file_btn)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -2690,8 +2695,30 @@ class ProcessPickerDialog(QtWidgets.QDialog):
         names.sort(key=lambda value: value.lower())
         for name in names:
             item = QtWidgets.QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if name.lower() in existing else Qt.Unchecked)
+            self.list_widget.addItem(item)
+
+    def _add_exe_files(self) -> None:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "종료 대상 프로그램 선택",
+            str(Path.home()),
+            "Executable Files (*.exe);;All Files (*)",
+        )
+        if not paths:
+            return
+        existing = {self.list_widget.item(i).text().lower() for i in range(self.list_widget.count())}
+        for path in paths:
+            name = Path(path).name
+            if not name:
+                continue
+            if name.lower() in existing:
+                continue
+            existing.add(name.lower())
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
             self.list_widget.addItem(item)
 
     def selected_names(self) -> List[str]:
@@ -2826,7 +2853,7 @@ class EasterEggDialog(QtWidgets.QDialog):
         quote.setWordWrap(True)
         quote.setTextFormat(Qt.RichText)
         quote.setProperty("popup-role", "hint")
-        quote.setStyleSheet("font-size: 14px; font-weight: 700;")
+        quote.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(quote)
         close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         close_btn.rejected.connect(self.reject)
