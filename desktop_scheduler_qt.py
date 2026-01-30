@@ -55,9 +55,9 @@ from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 APP_NAME = "AutoClose Studio"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 BUILD_DATE = "2025-11-06"
-AUTHOR_NAME = "Zolt46 / PSW / Emanon108"
+AUTHOR_NAME = "Zolt46 - PSW - Emanon108"
 ORGANIZATION_NAME = "AutoClose Studio"
 ORGANIZATION_DOMAIN = "autoclose.local"
 DEFAULT_USER_PASSWORD = "0000"
@@ -1807,6 +1807,8 @@ class SettingsPanel(FancyCard):
         outer = QtWidgets.QVBoxLayout()
         outer.setSpacing(16)
         self.target_edit = QtWidgets.QLineEdit(", ".join(cfg_mgr.config.targets))
+        self.target_picker_btn = QtWidgets.QPushButton("실행 중 프로그램 추가")
+        self.target_picker_btn.setCursor(Qt.PointingHandCursor)
         self.remote_toggle = StyledToggle()
         self.remote_toggle.setChecked(cfg_mgr.config.enable_remote_shutdown)
         self.remote_toggle.setToolTip("스케줄 종료 후 원격 PC 종료 명령을 전송합니다.")
@@ -1853,7 +1855,13 @@ class SettingsPanel(FancyCard):
 
         general_form = QtWidgets.QFormLayout()
         general_form.setSpacing(12)
-        general_form.addRow("종료 대상 프로그램", self.target_edit)
+        targets_row = QtWidgets.QHBoxLayout()
+        targets_row.setSpacing(8)
+        targets_row.addWidget(self.target_edit, 1)
+        targets_row.addWidget(self.target_picker_btn)
+        targets_widget = QtWidgets.QWidget()
+        targets_widget.setLayout(targets_row)
+        general_form.addRow("종료 대상 프로그램", targets_widget)
         general_form.addRow("시작 프로그램 등록", create_toggle_field("사용", self.startup_toggle))
         general_form.addRow("테마", self.accent_btn)
         general_form.addRow("설정 저장 위치", path_row)
@@ -1912,6 +1920,7 @@ class SettingsPanel(FancyCard):
         container.setLayout(outer)
         self.body_layout.addWidget(container)
         self.target_edit.editingFinished.connect(self._persist_targets)
+        self.target_picker_btn.clicked.connect(self._open_target_picker)
         self.remote_toggle.stateChanged.connect(lambda _: self._persist())
         self.local_toggle.stateChanged.connect(lambda _: self._persist())
         self.holiday_shutdown_toggle.stateChanged.connect(lambda _: self._persist())
@@ -1947,6 +1956,23 @@ class SettingsPanel(FancyCard):
         self.holiday_remote_toggle.setEnabled(enabled)
         self.holiday_local_toggle.setEnabled(enabled)
         self.holiday_delay_spin.setEnabled(enabled)
+
+    def _open_target_picker(self) -> None:
+        current = [p.strip() for p in self.target_edit.text().split(",") if p.strip()]
+        dialog = ProcessPickerDialog(current, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        selected = dialog.selected_names()
+        if not selected:
+            return
+        merged = current[:]
+        for name in selected:
+            if name not in merged:
+                merged.append(name)
+        if not merged:
+            return
+        self.target_edit.setText(", ".join(merged))
+        self._persist_targets()
 
     def _persist_targets(self) -> None:
         raw = [p.strip() for p in self.target_edit.text().split(",") if p.strip()]
@@ -2628,6 +2654,81 @@ class HelpDialog(QtWidgets.QDialog):
         layout.addWidget(close_btn)
         _apply_popup_typography(self)
 
+
+class ProcessPickerDialog(QtWidgets.QDialog):
+    def __init__(self, selected: List[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("실행 중 프로그램 선택")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self._selected = selected
+        layout = QtWidgets.QVBoxLayout(self)
+        guide = QtWidgets.QLabel("현재 실행 중인 프로그램 목록에서 종료 대상에 추가할 항목을 선택하세요.")
+        guide.setWordWrap(True)
+        guide.setProperty("popup-role", "body")
+        layout.addWidget(guide)
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.list_widget.setAlternatingRowColors(True)
+        layout.addWidget(self.list_widget, 1)
+        self.add_file_btn = QtWidgets.QPushButton("EXE 파일 추가")
+        self.add_file_btn.setCursor(Qt.PointingHandCursor)
+        self.add_file_btn.clicked.connect(self._add_exe_files)
+        layout.addWidget(self.add_file_btn)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._populate(selected)
+        _apply_popup_typography(self)
+
+    def _populate(self, selected: List[str]) -> None:
+        existing = {name.lower() for name in selected}
+        names: List[str] = []
+        for proc in psutil.process_iter(attrs=["name"]):
+            name = proc.info.get("name")
+            if not name:
+                continue
+            cleaned = name.strip()
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+        names.sort(key=lambda value: value.lower())
+        for name in names:
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if name.lower() in existing else Qt.Unchecked)
+            self.list_widget.addItem(item)
+
+    def _add_exe_files(self) -> None:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "종료 대상 프로그램 선택",
+            str(Path.home()),
+            "Executable Files (*.exe);;All Files (*)",
+        )
+        if not paths:
+            return
+        existing = {self.list_widget.item(i).text().lower() for i in range(self.list_widget.count())}
+        for path in paths:
+            name = Path(path).name
+            if not name:
+                continue
+            if name.lower() in existing:
+                continue
+            existing.add(name.lower())
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.list_widget.addItem(item)
+
+    def selected_names(self) -> List[str]:
+        selections: List[str] = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.checkState() == Qt.Checked:
+                selections.append(item.text())
+        return selections
+
 class TerminalLogDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2684,15 +2785,12 @@ class CreditsDialog(QtWidgets.QDialog):
         grid.addRow("버전", QtWidgets.QLabel(APP_VERSION))
         grid.addRow("제작자", QtWidgets.QLabel(AUTHOR_NAME))
         grid.addRow("제작 날짜", QtWidgets.QLabel(BUILD_DATE))
-        grid.addRow("저작권", QtWidgets.QLabel("© 2025 Zolt46 / PSW / Emanon108. All rights reserved."))
+        grid.addRow("저작권", QtWidgets.QLabel("© 2025 Zolt46 - PSW - Emanon108. All rights reserved."))
         grid.addRow("문의", QtWidgets.QLabel("다산정보관 참고자료실 데스크"))
         grid_widget = QtWidgets.QWidget()
         grid_widget.setLayout(grid)
         layout.addWidget(grid_widget)
-        note = QtWidgets.QLabel(
-            "• 고급 설정 → 상단 로고에서 원하는 이미지를 선택하면 상단 중앙 로고가 교체됩니다.\n"
-            "• 로고를 더블 클릭하면 ??"
-        )
+        note = QtWidgets.QLabel("• 로고를 더블 클릭하면 ??")
         note.setWordWrap(True)
         note.setProperty("popup-role", "body")
         layout.addWidget(note)
@@ -2716,6 +2814,12 @@ class EasterEggDialog(QtWidgets.QDialog):
             """
         )
         layout = QtWidgets.QVBoxLayout(self)
+        icon = _load_brand_icon()
+        if icon is not None and not icon.isNull():
+            icon_label = QtWidgets.QLabel()
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setPixmap(icon.pixmap(72, 72))
+            layout.addWidget(icon_label)
         ascii_art = r"""
   █████╗ ██╗   ██╗████████╗ ██████╗   ██████╗██╗      ██████╗ ███████╗███████╗
   ██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗  ██╔════╝██║     ██╔═══██╗██╔════╝██╔════╝
@@ -2749,6 +2853,7 @@ class EasterEggDialog(QtWidgets.QDialog):
         quote.setWordWrap(True)
         quote.setTextFormat(Qt.RichText)
         quote.setProperty("popup-role", "hint")
+        quote.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(quote)
         close_btn = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         close_btn.rejected.connect(self.reject)
@@ -4104,11 +4209,20 @@ class App(QtWidgets.QApplication):
             )
 
     def _show_help(self, mode: str) -> None:
+        def _add_spacing(lines: List[str]) -> List[str]:
+            spaced: List[str] = []
+            for line in lines:
+                spaced.append(line)
+                spaced.append("")
+            if spaced:
+                spaced.pop()
+            return spaced
+
         if mode == "admin":
             lines = [
                 "관리자 모드는 상단 제목(상단 바의 현재 페이지 이름)을 5회 연속 클릭하면 로그인 창이 나타납니다.",
                 "로그인 후 '휴일', '고급 설정' 페이지가 열리며, 원격 종료 등을 관리할 수 있습니다.",
-                "휴일 목록에서는 날짜나 기간을 추가하고 선택한 항목을 삭제할 수 있으며, 우클릭으로도 삭제할 수 있습니다.",
+                "휴일 목록에서는 날짜나 기간을 추가하고 선택한 항목을 삭제할 수 있습니다.",
                 "고급 설정에서 일반/관리자 비밀번호를 변경하고 원격 PC 목록, 테마, 시작 프로그램 등록을 조정하세요.",
                 "관리자 모드 종료 버튼을 누르면 일반 모드로 돌아갑니다. 잠금 버튼은 창을 숨기고 다시 로그인하도록 합니다.",
             ]
@@ -4122,7 +4236,7 @@ class App(QtWidgets.QApplication):
                 "상단의 잠금 버튼을 누르면 창이 숨겨지고, 다시 열려면 트레이에서 '열기'를 눌러 비밀번호를 입력해야 합니다.",
             ]
             title = "일반 기능 도움말"
-        dialog = HelpDialog(title, lines, parent=self.window)
+        dialog = HelpDialog(title, _add_spacing(lines), parent=self.window)
         dialog.exec()
 
 
